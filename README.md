@@ -10,12 +10,10 @@ Some of the code used from the final master project entitle as: "Multi center Ta
 3- pvca_subset_test.R: Principal variance component analysis with resampling to evaluate the different pipelines.  
 4- Testing_proteomic_signature_on_batch_3_samples: Prediction of batch 3 samples with proteomics signatures developed by using batch 1 and batch 2 samples as the training dataset.   
 ### 2- exceRpt microRNA analysis:  
-1- Sequencing alignment with exceRpt Docker.txt: Code used to apply the exceRpt Docker to several samples in paralalel.   
-
+1- Sequencing alignment with exceRpt Docker.txt: Code used to apply the exceRpt Docker to several samples in paralalel.    
 2- analysis_microRNA_exceRpt.R: Preprocessing of microRNA data.  
 ### 3- Multiomics integration and testing:  
-1- mixOmics integration and plots.R   
-
-2- Training and testing with random data partitioning.R  
+1- mixOmics integration and plots.R: Code used for N-integration with mixOmics and circular plot.  
+2- Training and testing with random data partitioning.R: Random data partitioning without replacement. Scaling, RFE, and random forest model training for the respective optimal subset of selected features was applied to the training subset and then used to predict the classes in the testing subset.   
 ### 4- Cross-validation and Recursive Feature Elimination:    
-1- Cross-validation and Recursive Feature elimination.R  
+1- Cross-validation and Recursive Feature elimination.R: Code used for testing with cross-validation with all features and for recursive feature elimination. This approach was used for the proteomics, microRNA and multiomics data.  
