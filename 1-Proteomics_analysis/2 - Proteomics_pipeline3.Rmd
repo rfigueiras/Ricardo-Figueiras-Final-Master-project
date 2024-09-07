@@ -1,0 +1,1392 @@
+---
+title: "Proteomic dataset - batch independent analysis"
+author: "Ricardo Figueiras"
+date: "2024-06-21"
+output:
+  word_document: default
+  officedown::rdocx_document:
+    fig_caption: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
+```
+
+```{r lib}
+
+
+#if (!require("BiocManager", quietly = TRUE))
+ # install.packages("BiocManager")
+
+#BiocManager::install("quantro")
+#BiocManager::install("DEP")
+#BiocManager::install("qsmooth")
+#install.packages("Biobase")
+#install.packages("devtools")
+#library(devtools)
+#devtools::install_github("HSU-HPC/HarmonizR")
+#BiocManager::install("proBatch")
+
+#if (!requireNamespace("devtools", quietly = TRUE)) {
+#  install.packages("devtools")
+#}
+#devtools::install_github("symbioticMe/proBatch")
+#install.packages("imputeLCMD")
+
+
+
+
+library(Biobase)
+library(SummarizedExperiment)
+library(qsmooth)
+
+library(dplyr)
+
+#Plots
+library(pheatmap)
+library(scatterplot3d)
+library(ggfortify)
+library(ggplot2)
+library(RColorBrewer)
+library(pheatmap)
+library(visdat)
+#Distribution assessment 
+library(quantro)
+library(DEP)
+
+#Batch effect correction
+library(limma)
+library(HarmonizR)
+
+#library(proBatch)
+
+library(imputeLCMD)# for Imputation
+library(doParallel)
+```
+
+## Data input
+
+```{r loading}
+MS_all<-read.csv("EVT87951_WP3_WP2b_WP2a_WP1_nexplor_Protein-Groups_wo_batch_correction_Ricardo_sorted.csv", check.names = FALSE, 
+                   stringsAsFactors = FALSE, 
+                   fileEncoding = "UTF-8") #Protein data 
+
+metadata<-read.csv("Mursla_Cohort1a_1b_metadata.csv", check.names = FALSE, stringsAsFactors = FALSE, 
+                   fileEncoding = "UTF-8")# metadata
+
+
+colnames(MS_all)<- c("protein_id", colnames(MS_all[,-1]))
+
+#removing second line (not necessary)
+MS_all<-MS_all[-2,]
+
+
+#setting Proteins IDs as row names and remove column
+rownames(MS_all)<-MS_all[,1]
+MS_all<-as.data.frame(MS_all[,-1])
+
+#making sure intensity values are numeric
+MS_all_num <- sapply(MS_all, function(x) as.numeric(x))
+rownames(MS_all_num) <- rownames(MS_all)
+MS_all_num<- as.data.frame(MS_all_num)
+
+MS_all_num<-MS_all_num[rowSums(!is.na(MS_all_num))>0,]
+
+
+# Metadata
+# subset for samples present in the Mass-spec results matrix
+metadata_filt<- metadata[ metadata$Sample_ID %in% colnames(MS_all_num),]
+
+#order MS columns by same sample order as in metadata
+order_indices <- match(metadata_filt$Sample_ID, colnames(MS_all_num))
+MS_all_order <- MS_all_num[,order_indices]
+
+
+metadata_filt$Prep_day<-as.factor(metadata_filt$Prep_day)
+
+
+#sub-setting metadata for each batch
+metadata_f_batch1<- metadata_filt[metadata_filt$MS_batch=="Batch1",]
+metadata_f_batch2<- metadata_filt[metadata_filt$MS_batch=="Batch2",]
+metadata_f_batch3<- metadata_filt[metadata_filt$MS_batch=="Batch3",]
+
+#sub-setting metadata for each batch
+MS_batch1 <- MS_all_order[,metadata_filt$MS_batch=="Batch1"]
+MS_batch2 <- MS_all_order[,metadata_filt$MS_batch=="Batch2"]
+MS_batch3 <- MS_all_order[,metadata_filt$MS_batch=="Batch3"]
+
+#Making sure there are no rows with only NAs
+MS_batch1<-MS_batch1[rowSums(!is.na(MS_batch1))>0,]
+MS_batch2<-MS_batch2[rowSums(!is.na(MS_batch2))>0,]
+MS_batch3<-MS_batch3[rowSums(!is.na(MS_batch3))>0,]
+```
+
+```{r data inspection}
+print("Metadata per batch:")
+
+dim(metadata_f_batch1)
+dim(metadata_f_batch2)
+dim(metadata_f_batch3)
+
+print("Protein groups per batch:")
+print("Batch1:")
+dim(MS_batch1)[1]
+print("Batch2:")
+dim(MS_batch2)[1]
+print("Batch3:")
+dim(MS_batch3)[1]
+
+print("Protein groups in total:")
+dim(MS_all_order)[1]
+
+print("Protein group common in the 3 Batches:")
+length(intersect(intersect(rownames(MS_batch1), rownames(MS_batch2)), rownames(MS_batch3)))
+```
+<br/>  
+
+### Initial PCA
+<br/>  
+There is high variability in the data with first 2 PC's explaining only 20% of the variability. Samples seem to cluster by batch of MS measurement. 
+<br/>  
+```{r initialPCAbuild}
+MS_batch1_complete<- MS_batch1[complete.cases(MS_batch1),]
+MS_batch2_complete<- MS_batch2[complete.cases(MS_batch2),]
+MS_batch3_complete<- MS_batch3[complete.cases(MS_batch3),]
+
+PCA_Batch1<-prcomp(t(MS_batch1_complete), scale. = TRUE)
+PCA_Batch2<-prcomp(t(MS_batch2_complete), scale. = TRUE)
+PCA_Batch3<-prcomp(t(MS_batch3_complete), scale. = TRUE)
+
+
+PCA1<-autoplot(PCA_Batch1, data=metadata_f_batch1, colour='Group', main='Batch1 PCA colored by phenotype') + 
+  geom_text(aes(label = metadata_f_batch1$Sample_ID), vjust = 1, hjust = 1)
+
+
+PCA2<-autoplot(PCA_Batch2, data=metadata_f_batch2, colour='Group', main='Batch2 PCA colored by phenotype') + 
+  geom_text(aes(label = metadata_f_batch2$Sample_ID), vjust = 1, hjust = 1)
+
+PCA3<-autoplot(PCA_Batch3, data=metadata_f_batch3, colour='Group', main='Batch3 PCA colored by phenotype') + 
+  geom_text(aes(label = metadata_f_batch3$Sample_ID), vjust = 1, hjust = 1)
+
+```
+
+```{r initialPCA, out.width='50%', fig.keep='all', fig.show='hold', fig.cap='Figure 1. First PCA of complete cases for each batch colored by penotype'}
+PCA1
+PCA2
+PCA3
+
+```
+<br/>  
+
+```{r initialPCAprepday, out.width='50%', fig.keep='all', fig.show='hold', fig.cap='Figure 2. First PCA of complete cases for each batch colored by day of preparation'}
+autoplot(PCA_Batch1, data=metadata_f_batch1, colour='Prep_day', main='Batch1 PCA colored by day') + 
+  geom_text(aes(label = metadata_f_batch1$Sample_ID), vjust = 1, hjust = 1)
+
+autoplot(PCA_Batch2, data=metadata_f_batch2, colour='Prep_day', main='Batch2 PCA colored by day') + 
+  geom_text(aes(label = metadata_f_batch2$Sample_ID), vjust = 1, hjust = 1)
+
+autoplot(PCA_Batch3, data=metadata_f_batch3, colour='Prep_day', main='Batch3 PCA colored by day') + 
+  geom_text(aes(label = metadata_f_batch3$Sample_ID), vjust = 1, hjust = 1)
+
+```
+<br/>   
+- A good amount of the variability is explained by the first two components, lowest 35% for batch 2. 
+- No clear aggregation visible by phenotype (HCC and Cirrhosis).
+- No aggregation by day of preparation, indicating that there isn't batch effect caused by Mursla's processing.  
+<br/>  
+
+## 1- Filtering steps
+<br/>  
+
+### 1.1. Filter samples with low counts
+<br/>  
+On this step:  
+- Contaminants (IgGs and Keratins) will be filtered.   
+- Protein groups counts will be inspected to evaluate if samples should be filtered.  
+<br/> 
+
+```{r removecontaminants}
+#Remove Igg and Keratin contaminant proteins
+ig_proteins_batch1 <- grep("^(IGKV|IGLV|IGHV|IGHM|IGHG|KRT*)", rownames(MS_batch1), value = TRUE)
+ig_proteins_batch2 <- grep("^(IGKV|IGLV|IGHV|IGHM|IGHG|KRT*)", rownames(MS_batch2), value = TRUE)
+ig_proteins_batch3 <- grep("^(IGKV|IGLV|IGHV|IGHM|IGHG|KRT*)", rownames(MS_batch3), value = TRUE)
+
+MS_batch1_f <- MS_batch1[!rownames(MS_batch1) %in% ig_proteins_batch1, ]
+MS_batch2_f <- MS_batch2[!rownames(MS_batch2) %in% ig_proteins_batch2, ]
+MS_batch3_f <- MS_batch3[!rownames(MS_batch3) %in% ig_proteins_batch3, ]
+
+
+```
+
+```{r Protein_ID_counts, fig.cap='Figure 3. Boxplots protein group counts per batch'}
+#Protein Id counts per batch
+counts_proteins_IDs_batch1<- apply(MS_batch1_f, 2, function(x) sum(!is.na(x)))
+counts_proteins_IDs_batch2<- apply(MS_batch2_f, 2, function(x) sum(!is.na(x)))
+counts_proteins_IDs_batch3<- apply(MS_batch3_f, 2, function(x) sum(!is.na(x)))
+counts_proteins_IDs_all<- apply(MS_batch3_f, 2, function(x) sum(!is.na(x)))
+
+protein_IDs_count_df_batch1<- data.frame(protein_counts = counts_proteins_IDs_batch1, 
+                                  sample_ID = metadata_f_batch1$Sample_ID, 
+                                  group = metadata_f_batch1$Group,
+                                  batch= metadata_f_batch1$MS_batch)
+
+
+protein_IDs_count_df_batch2<- data.frame(protein_counts = counts_proteins_IDs_batch2, 
+                                  sample_ID = metadata_f_batch2$Sample_ID, 
+                                  group = metadata_f_batch2$Group,
+                                  batch= metadata_f_batch2$MS_batch)
+
+
+protein_IDs_count_df_batch3<- data.frame(protein_counts = counts_proteins_IDs_batch3, 
+                                  sample_ID = metadata_f_batch3$Sample_ID, 
+                                  group = metadata_f_batch3$Group,
+                                  batch= metadata_f_batch3$MS_batch)
+
+
+boxplot(counts_proteins_IDs_batch1, counts_proteins_IDs_batch2, counts_proteins_IDs_batch3)
+```
+<br/>    
+```{r summary_counts}
+#summary distribution of IDs per batch
+print("Summary distribution of protein group counts per sample in each batch:")
+print("Summary Batch1:")
+summary(counts_proteins_IDs_batch1)
+print("Summary Batch2:")
+summary(counts_proteins_IDs_batch2)
+print("Summary Batch3:")
+summary(counts_proteins_IDs_batch3)
+```
+<br/>  
+PGs counts vary widely across batches. Batch 2 had identified technical problems during the protein digestion, this translated to a higher sample variability as observed by the wider interquantile range on the boxplot. For that reason will filter for samples that do not have at least the minimum number of PGs detected in other batches (330 PGs).
+<br/>  
+```{r filter_samplescounts}
+#Filter samples will less than 330 protein identifications
+metadata_filt_batch1<-metadata_f_batch1
+MS_batch1_fs<-MS_batch1_f
+print("Batch1:")
+table(metadata_filt_batch1$Group)
+
+
+print("Batch2 filtering:")
+table(colSums(!is.na(MS_batch2_f))>330)
+MS_batch2_fs<-MS_batch2_f[,colSums(!is.na(MS_batch2_f))>330]
+metadata_filt_batch2<-metadata_f_batch2[colSums(!is.na(MS_batch2_f))>330,]
+print("Batch2 after filter:")
+table(metadata_filt_batch2$Group)
+
+
+metadata_filt_batch3<-metadata_f_batch3
+MS_batch3_fs<-MS_batch3_f
+print("Batch3:")
+table(metadata_filt_batch3$Group)
+```
+<br/>  
+**Filtering:** 14 samples from Batch2 filtered out.     
+<br/>  
+**Number of samples per Batch:**   
+-**Batch 1:** 20 Cirrhosis & 19 HCC  
+-**Batch 2:** 32 Cirrhosis & 27 HCC  
+-**Batch 3:** 15 Cirrhosis & 14 HCC  
+<br/>  
+
+### 1.2. Filter proteins that are not consistent across samples of the same phenotype
+<br/>  
+Will remove PGs that are not present in at least **50% of the samples in at least one of the phenotype groups (HCC, Cirrhosis) for Batch1 and 40% for Batch2 and Batch3.**  
+Batch 2 and Batch 3 had fewer protein groups identified compared to Batch1, so trying to minimize filtering out as much in these batches. 
+<br/>    
+```{r filter_proteins}
+#Filter out proteins that are not present in at least 50% of the samples
+# in at least one of the groups
+
+threshold_HCC_batch1 <- ceiling(0.50 * sum(metadata_filt_batch1$Group == "HCC"))
+threshold_CIRR_batch1 <- ceiling(0.50 * sum(metadata_filt_batch1$Group == "Cirrhosis"))
+threshold_HCC_batch2 <- ceiling(0.4 * sum(metadata_filt_batch2$Group == "HCC"))
+threshold_CIRR_batch2 <- ceiling(0.4 * sum(metadata_filt_batch2$Group == "Cirrhosis"))
+threshold_HCC_batch3 <- ceiling(0.4 * sum(metadata_filt_batch3$Group == "HCC"))
+threshold_CIRR_batch3 <- ceiling(0.4 * sum(metadata_filt_batch3$Group == "Cirrhosis"))
+
+keep_HCC_batch1 <- rowSums(!is.na(MS_batch1_fs[, metadata_filt_batch1$Group == "HCC"])) >= threshold_HCC_batch1
+keep_CIRR_batch1 <- rowSums(!is.na(MS_batch1_fs[, metadata_filt_batch1$Group == "Cirrhosis"])) >= threshold_CIRR_batch1
+
+keep_HCC_batch2 <- rowSums(!is.na(MS_batch2_fs[, metadata_filt_batch2$Group == "HCC"])) >= threshold_HCC_batch2
+keep_CIRR_batch2 <- rowSums(!is.na(MS_batch2_fs[, metadata_filt_batch2$Group == "Cirrhosis"])) >= threshold_CIRR_batch2
+
+keep_HCC_batch3 <- rowSums(!is.na(MS_batch3_fs[, metadata_filt_batch3$Group == "HCC"])) >= threshold_HCC_batch3
+keep_CIRR_batch3 <- rowSums(!is.na(MS_batch3_fs[, metadata_filt_batch3$Group == "Cirrhosis"])) >= threshold_CIRR_batch3
+
+
+keep_P50_batch1<-keep_HCC_batch1|keep_CIRR_batch1
+keep_P40_batch2<-keep_HCC_batch2|keep_CIRR_batch2
+keep_P40_batch3<-keep_HCC_batch3|keep_CIRR_batch3
+
+# 763 were kept and 3954 filtered out
+table(keep_P50_batch1)
+table(keep_P40_batch2)
+table(keep_P40_batch3)
+
+MS_batch1_fp<-MS_batch1_fs[keep_P50_batch1,]
+MS_batch2_fp<-MS_batch2_fs[keep_P40_batch2,]
+MS_batch3_fp<-MS_batch3_fs[keep_P40_batch3,]
+
+rownames(metadata_filt_batch3)<- metadata_filt_batch3$Sample_ID
+```
+<br/>  
+**Batch1: 1096 remained.**
+**Batch2: 649 remained.**
+**Batch3: 815 remained.**
+
+
+```{r intersect_proteins}
+
+# how many protein groups are present in the 3 batches after filtering
+intersect_filtered_p1<-(intersect(rownames(MS_batch1_fp), rownames(MS_batch2_fp)))
+intersect_filtered_p2<-(intersect(rownames(MS_batch1_fp), rownames(MS_batch3_fp)))
+length(intersect(intersect_filtered_p1, intersect_filtered_p2))
+```
+<br/>  
+
+**A total of 416 proteins intersect the 3 batches.**
+<br/>  
+
+## 2 - Exploratory analysis after filtering
+<br/> 
+
+### 2.1. Intensity distribution
+<br/>  
+Checking the intensity distribution and density and compare it across batches and phenotypes: 
+<br/>  
+```{r intensity_density, out.width='50%', fig.keep='all', fig.show='hold', fig.cap='Figure 4. Intensity density for each batch'}
+
+
+
+#check density distribution per group
+
+matdensity(as.matrix(MS_batch1_f), groupFactor = as.factor(metadata_filt_batch1$Group), xlab = " ", ylab = "density",
+           main = "Batch1 density Log2 Intensity \nvalues per phenotype/group", brewer.n = 8, brewer.name = "Set1")
+
+
+
+matdensity(as.matrix(MS_batch2_f), groupFactor = as.factor(metadata_filt_batch2$Group), xlab = " ", ylab = "density",
+           main = "Batch2 density Log2 Intensity \nvalues per phenotype/group", brewer.n = 8, brewer.name = "Set1")
+
+
+
+matdensity(as.matrix(MS_batch3_f), groupFactor = as.factor(metadata_filt_batch3$Group), xlab = " ", ylab = "density",
+           main = "Batch3 density Log2 Intensity \nvalues per phenotype/group", brewer.n = 8, brewer.name = "Set1")
+
+# Adding a legend
+legend("topright",                           
+legend = levels(as.factor(metadata_filt_batch1$Group)),  
+col = brewer.pal(8, "Set1"),          
+lty = 1,                              
+lwd = 2,                              
+title = "Group")
+
+
+```
+<br/>  
+```{r intensity_distribution, out.width='50%', fig.keep='all', fig.show='hold', fig.cap='Figure 5 Intensity density for each batch'}
+
+#check density distribution per batch
+
+matboxplot(as.matrix(MS_batch1_f), groupFactor = as.factor(metadata_filt_batch1$Group), xlab = " ", ylab = "density",
+           main = "Batch1 density Log2 Intensity \nvalues per phenotype/group", brewer.n = 8, brewer.name = "Set1")
+
+
+
+matboxplot(as.matrix(MS_batch2_f), groupFactor = as.factor(metadata_filt_batch2$Group), xlab = " ", ylab = "density",
+           main = "Batch2 density Log2 Intensity \nvalues per phenotype/group", brewer.n = 8, brewer.name = "Set1")
+
+
+
+matboxplot(as.matrix(MS_batch3_f), groupFactor = as.factor(metadata_filt_batch3$Group), xlab = " ", ylab = "density",
+           main = "Batch3 density Log2 Intensity \nvalues per phenotype/group", brewer.n = 8, brewer.name = "Set1")
+
+# Adding a legend
+legend("topright",                           
+legend = levels(as.factor(metadata_filt_batch1$Group)),  
+col = brewer.pal(8, "Set1"),          
+lty = 1,                              
+lwd = 2,                              
+title = "Batch")
+
+```
+
+Batch 1 seems to have a more uniform distribution from sample to sample. Although there is a good overlap between the 2 groups for batch 2 and batch 3 the signal distribution seems to have some variability across samples. 
+<br/>  
+Testing statistically for **global difference in distribution across phenotype/group** with anova with permutations to confirm plots interpretation (quantro package):  
+**BATCH1:**
+<br/>  
+```{r quantro_groups_batch1}
+MS_batch1_fp_complete<-MS_batch1_fp[complete.cases(MS_batch1_fp),]
+MS_batch2_fp_complete<-MS_batch2_fp[complete.cases(MS_batch2_fp),]
+MS_batch3_fp_complete<-MS_batch3_fp[complete.cases(MS_batch3_fp),]
+
+quantro(MS_batch1_fp_complete, metadata_filt_batch1$Group, B=1000)
+```
+<br/>  
+**BATCH2:**
+<br/>  
+```{r quantro_groups_batch2}
+quantro(MS_batch2_fp_complete, metadata_filt_batch2$Group, B=1000)
+```
+<br/>  
+**BATCH3:**
+<br/>  
+```{r quantro_groups_batch3}
+quantro(MS_batch3_fp_complete, metadata_filt_batch3$Group, B=1000)
+```
+<br/>  
+Batch 2 has significant differences for intensity distributions between HCC and Cirrhosis. 
+<br/>  
+
+### 2.2. Checking missing values
+<br/> 
+
+#### Frequency and intensity
+<br/>  
+**Missing values Batch1**
+```{r Missing Values Batch1, out.width='100%', fig.keep='all', fig.show='hold', fig.cap='Figure 6.1 Batch 1 missing values frequency and intensity'}
+
+MS_Batch1_ES<-ExpressionSet(as.matrix(MS_batch1_fp), phenoData=AnnotatedDataFrame(metadata_filt_batch1))
+MS_Bath1_SE<-makeSummarizedExperimentFromExpressionSet(MS_Batch1_ES)
+
+
+DEP::plot_detect(MS_Bath1_SE)
+```
+<br/>  
+**Missing values Batch2**
+```{r Missing Values Batch2, out.width='100%', fig.keep='all', fig.show='hold', fig.cap='Figure 6.2 Batch 2 missing values frequency and intensity'}
+MS_Batch2_ES<-ExpressionSet(as.matrix(MS_batch2_fp), phenoData=AnnotatedDataFrame(metadata_filt_batch2))
+MS_Bath2_SE<-makeSummarizedExperimentFromExpressionSet(MS_Batch2_ES)
+
+
+
+
+DEP::plot_detect(MS_Bath2_SE)
+```
+<br/>  
+**Missing values Batch3**
+```{r Missing Values Batch3, out.width='100%', fig.keep='all', fig.show='hold', fig.cap='Figure 6.3 Batch 3 missing values frequency and intensity'}
+
+
+MS_Batch3_ES<-ExpressionSet(as.matrix(MS_batch3_fp), phenoData=AnnotatedDataFrame(metadata_filt_batch3))
+MS_Bath3_SE<-makeSummarizedExperimentFromExpressionSet(MS_Batch3_ES)
+
+
+
+
+DEP::plot_detect(MS_Bath3_SE)
+
+
+
+
+```
+<br/>  
+Most protein groups with missing values (MVs) have overall low intensity, most missing values seem to be intensity dependent. However, Batch 1 protein groups with missing values have lower intensities than in Batch 2 and Batch 3, with Batch 2 standing out with many protein groups with high and medium intensity having MVs.
+<br/>
+
+```{r functions_pheatmap}
+
+#Wrote two functions adapting 'pheatmap' function:
+#one to make it more convenient to plot clustering heatmap ("easy_pheatmap" function) 
+#another called "miss_val_pheatmap" to generate a cluster heatmap considering only the missing values.
+
+
+
+#miss_val_pheatmap function
+miss_val_pheatmap <- function(matrix, Samples, variable1, variable2 = NULL, variable3 = NULL, variable4 = NULL, 
+                              color_variable1, color_variable2 = NULL, color_variable3 = NULL, color_variable4 = NULL, ...) {
+  # Replace NA values with 0
+  matrix[is.na(matrix)] <- 0
+  # Replace all values not missing values with 1
+  matrix[matrix > 0] <- 1
+  
+  
+  # Convert variable1 to factor and set colors
+  variable1 <- as.factor(variable1)
+  if (length(color_variable1) != length(levels(variable1))) {
+    stop("Length of color_variable1 must match the number of levels in variable1")
+  }
+  
+  # Prepare annotation data frame
+  annotation <- data.frame(variable1)
+  annotation_colors <- list(
+    variable1 = setNames(color_variable1, levels(variable1))
+  )
+  
+  # Add variable2 if provided
+  if (!is.null(variable2)) {
+    variable2 <- as.factor(variable2)
+    if (length(color_variable2) != length(levels(variable2))) {
+      stop("Length of color_variable2 must match the number of levels in variable2")
+    }
+    annotation$variable2 <- variable2
+    annotation_colors$variable2 <- setNames(color_variable2, levels(variable2))
+  }
+  
+  # Add variable3 if provided
+  if (!is.null(variable3)) {
+    variable3 <- as.factor(variable3)
+    if (length(color_variable3) != length(levels(variable3))) {
+      stop("Length of color_variable3 must match the number of levels in variable3")
+    }
+    annotation$variable3 <- variable3
+    annotation_colors$variable3 <- setNames(color_variable3, levels(variable3))
+  }
+  
+  
+    if (!is.null(variable4)) {
+    variable4 <- as.factor(variable4)
+    if (length(color_variable4) != length(levels(variable4))) {
+      stop("Length of color_variable4 must match the number of levels in variable4")
+    }
+    annotation$variable4 <- variable4
+    annotation_colors$variable4 <- setNames(color_variable4, levels(variable4))
+  }
+  
+  # Ensure row names of annotation match column names of the matrix
+  rownames(annotation) <- Samples
+  colnames(matrix) <- Samples
+  
+  # Generate the heatmap with extra arguments passed to pheatmap
+  pheatmap(matrix,
+           annotation_col = annotation,
+           annotation_colors = annotation_colors,
+           ...)
+}
+
+
+
+#easy_pheatmap function
+easy_pheatmap <- function(matrix, Samples, variable1, variable2 = NULL, variable3 = NULL, variable4 = NULL,
+                color_variable1, color_variable2 = NULL, color_variable3 = NULL, color_variable4 = NULL, ...) {
+  # Convert variable1 to factor and set colors
+  variable1 <- as.factor(variable1)
+  if (length(color_variable1) != length(levels(variable1))) {
+    stop("Length of color_variable1 must match the number of levels in variable1")
+  }
+  
+  # Prepare annotation data frame
+  annotation <- data.frame(variable1)
+  annotation_colors <- list(
+    variable1 = setNames(color_variable1, levels(variable1))
+  )
+  
+  # Add variable2 if provided
+  if (!is.null(variable2)) {
+    variable2 <- as.factor(variable2)
+    if (length(color_variable2) != length(levels(variable2))) {
+      stop("Length of color_variable2 must match the number of levels in variable2")
+    }
+    annotation$variable2 <- variable2
+    annotation_colors$variable2 <- setNames(color_variable2, levels(variable2))
+  }
+  
+  # Add variable3 if provided
+  if (!is.null(variable3)) {
+    variable3 <- as.factor(variable3)
+    if (length(color_variable3) != length(levels(variable3))) {
+      stop("Length of color_variable3 must match the number of levels in variable3")
+    }
+    annotation$variable3 <- variable3
+    annotation_colors$variable3 <- setNames(color_variable3, levels(variable3))
+  }
+  
+  
+  # Add variable3 if provided
+  if (!is.null(variable4)) {
+    variable4 <- as.factor(variable4)
+    if (length(color_variable4) != length(levels(variable4))) {
+      stop("Length of color_variable4 must match the number of levels in variable4")
+    }
+    annotation$variable4 <- variable4
+    annotation_colors$variable4 <- setNames(color_variable4, levels(variable4))
+  }
+  
+  # Ensure row names of annotation match column names of the matrix
+  rownames(annotation) <- Samples
+  colnames(matrix) <- Samples
+  
+  # Generate the heatmap with extra arguments passed to pheatmap
+  pheatmap(matrix,
+           annotation_col = annotation,
+           annotation_colors = annotation_colors,
+           ...)
+}
+```
+<br/>  
+
+#### Percentage of missing values:
+<br/> 
+```{r missingvalspercent, fig.keep='all', out.width='50%',  fig.show='hold', fig.cap='Figure 7. Percentage of missing values '}
+MS_batch1_fp_miss<-MS_batch1_fp
+p1<-vis_miss(MS_batch1_fp_miss, cluster = TRUE)
+p1
+
+MS_batch2_fp_miss<-MS_batch2_fp
+p2<-vis_miss(MS_batch2_fp_miss, cluster = TRUE)
+p2
+
+MS_batch3_fp_miss<-MS_batch3_fp
+p3<-vis_miss(MS_batch3_fp_miss, cluster = TRUE)
+p3
+```
+<br/>  
+Batch1: 18.7%.
+Batch2: 30.9%
+Batch3: 39.1%
+<br/>  
+
+#### Clustering of missing values:
+<br/> 
+```{r pheatmap, fig.keep='all', out.width='50%',  fig.show='hold', fig.cap='Figure 8. Missing values clustering heatmap (variable 1 = phenotype)'}
+#removing features without missing values
+MS_batch1_f_miss<-MS_batch1_fp[!complete.cases(MS_batch1_fp),]
+MS_batch2_f_miss<-MS_batch2_fp[!complete.cases(MS_batch2_fp),]
+MS_batch3_f_miss<-MS_batch3_fp[!complete.cases(MS_batch3_fp),]
+
+
+miss_val_pheatmap(matrix = MS_batch1_f_miss, Samples= metadata_filt_batch1$Sample_ID, 
+                  variable1 = metadata_filt_batch1$Group,
+                  variable2 = metadata_filt_batch1$Etiology2,
+                  variable3 = metadata_filt_batch1$Year.of.blood.collection,
+                  variable4 = metadata_filt_batch1$Rounded.volume,
+                  color_variable1 = c("orange", "cyan"),
+                  color_variable2 = c(brewer.pal(length(unique(metadata_filt_batch1$Etiology2)), "BrBG")),
+                  color_variable3 = c(brewer.pal(length(unique(metadata_filt_batch1$Year.of.blood.collection)), "Set2")),
+                  color_variable4 = c(brewer.pal(length(unique(metadata_filt_batch1$Rounded.volume)), "Set1")),
+                  show_rownames= FALSE, main= "Missing values Heatmap Batch1")
+
+miss_val_pheatmap(matrix = MS_batch2_f_miss, Samples= metadata_filt_batch2$Sample_ID, 
+                  variable1 = metadata_filt_batch2$Group,
+                  variable2 = metadata_filt_batch2$Etiology2,
+                  variable3 = metadata_filt_batch2$Year.of.blood.collection,
+                  variable4 = metadata_filt_batch2$Rounded.volume,
+                  color_variable1 = c("orange", "cyan"),
+                  color_variable2 = c(brewer.pal(length(unique(metadata_filt_batch2$Etiology2)), "BrBG")),
+                  color_variable3 = c(brewer.pal(length(unique(metadata_filt_batch2$Year.of.blood.collection)), "Set2")),
+                  color_variable4 = c(brewer.pal(length(unique(metadata_filt_batch2$Rounded.volume)), "Set1")),
+                  show_rownames= FALSE, main= "Missing values Heatmap Batch2")
+
+miss_val_pheatmap(matrix = MS_batch3_f_miss, Samples= metadata_filt_batch3$Sample_ID, 
+                  variable1 = metadata_filt_batch3$Group,
+                  variable2 = metadata_filt_batch3$Etiology2,
+                  variable3 = metadata_filt_batch3$Year.of.blood.collection,
+                  variable4 = metadata_filt_batch3$Rounded.volume,
+                  color_variable1 = c("orange", "cyan"),
+                  color_variable2 = c(brewer.pal(length(unique(metadata_filt_batch3$Etiology2)), "BrBG")),
+                  color_variable3 = c(brewer.pal(length(unique(metadata_filt_batch3$Year.of.blood.collection)), "Set2")),
+                  color_variable4 = c(brewer.pal(length(unique(metadata_filt_batch3$Rounded.volume)), "Set1")),
+                  show_rownames= FALSE, main= "Missing values Heatmap Batch3")
+```
+<br/>  
+There is some clustering by samples of the same phenotype driven by the pattern 
+of missing values, specially in Batch 3 and to a less extent Batch1. 
+This together with the fact that the missing values seem to have some 
+dependency on intensity, indicates that a sizable proportion of MVs
+are Missing not at Random (MNAR). However, the considerable number of proteins groups
+with higher intensity for Batch2 and Batch3 suggests that some MVs are 
+Missing at Random (MAR).
+MVs will be treated as a mix of MNAR and MAR. 
+<br/>  
+
+## 3- Normalizationa and imputation
+<br/> 
+
+### 3.1 - VSN normalization
+<br/>  
+Log2 intensities will be reverted to the original scale and VSN normalization
+applied.
+<br/>  
+
+```{r vsn norm, out.width='50%', fig.keep='all', fig.show='hold', fig.cap='Figure 9 VSN normalization mean-variance plots'}
+library("vsn")
+
+#reverting to original scale before applying vsn
+Batch1_reverted <- 2^as.matrix(MS_batch1_fp)
+Batch2_reverted  <- 2^as.matrix(MS_batch2_fp)
+Batch3_reverted  <- 2^as.matrix(MS_batch3_fp)
+
+
+#vsn normalization
+vsnfit1<- vsn2(as.matrix(Batch1_reverted))
+vsnfit2<- vsn2(as.matrix(Batch2_reverted))
+vsnfit3<- vsn2(as.matrix(Batch3_reverted))
+
+vsn_batch1<-predict(vsnfit1, as.matrix(Batch1_reverted))
+vsn_batch2<-predict(vsnfit2, as.matrix(Batch2_reverted))
+vsn_batch3<-predict(vsnfit3, as.matrix(Batch3_reverted))
+
+
+#verify the fit for each batch
+vsn::meanSdPlot(vsnfit1)
+vsn::meanSdPlot(vsnfit2)
+vsn::meanSdPlot(vsnfit3)
+
+```
+<br/>  
+Variance is relatively stable across the mean intensities, with some higher
+variability in the protein groups with higher mean intensity, particularly for 
+Batch 3, and to a less extent for Batch 2. Overall, VSN normalization seems to 
+stabilize the variance successfully.
+<br/>  
+```{r vsn, out.width='50%', fig.keep='all', fig.show='hold', fig.cap='Figure 10 PCAs after and before imputation'}
+#PCA of completes cases after vsn normalization
+Batch1_vsn<- as.matrix(vsn_batch1)
+Batch2_vsn<- as.matrix(vsn_batch2)
+Batch3_vsn<- as.matrix(vsn_batch3)
+
+Batch1_vsn_complete<-Batch1_vsn[complete.cases(Batch1_vsn),]
+Batch2_vsn_complete<-Batch2_vsn[complete.cases(Batch2_vsn),]
+Batch3_vsn_complete<-Batch3_vsn[complete.cases(Batch3_vsn),]
+
+PCA_vsn_Batch1<-prcomp(t(Batch1_vsn_complete), scale. = TRUE)
+PCA_vsn_Batch2<-prcomp(t(Batch2_vsn_complete), scale. = TRUE)
+PCA_vsn_Batch3<-prcomp(t(Batch3_vsn_complete), scale. = TRUE)
+
+
+
+
+autoplot(PCA_vsn_Batch1, data=metadata_filt_batch1, colour='Group', main='Batch1 VSN normalization PCA colored by phenotype') + 
+  geom_text(aes(label = metadata_filt_batch1$Sample_ID), vjust = 1, hjust = 1)
+
+
+
+autoplot(PCA_vsn_Batch2, data=metadata_filt_batch2, colour='Group', main='Batch2 VSN normalization PCA colored by phenotype') + 
+  geom_text(aes(label = metadata_filt_batch2$Sample_ID), vjust = 1, hjust = 1)
+
+
+
+autoplot(PCA_vsn_Batch3, data=metadata_filt_batch3, colour='Group', main='Batch3 VSN normalization PCA colored by phenotype') + 
+  geom_text(aes(label = metadata_filt_batch3$Sample_ID), vjust = 1, hjust = 1)
+```
+
+<br/>  
+Aggregation by phenotype seems to have improved for Batch 1 after normalization.
+<br/>  
+
+### 3.2 - Custom imputation
+<br/>  
+A custom function will be used to impute MNAR and MAR missing values:
+Rows with only missing values or only one not missing value for a group 
+(HCC or Cirrhosis) will be treated as MNAR and have 0 imputation 
+for that respective group. 
+Rows with more than 75% of missing values for a specific phenotype (HCC or Cirrhosis)
+, will be treated as MNAR and be imputed with MinProb left censored imputation. 
+Remaining rows will be treated as MAR and be imputed with KNN.
+<br/>  
+```{r imputation custom function}
+
+#Prepared a custom imputation function for MNAR and MAR missing values.   
+#Rows with only missing values or only one not missing value for a group will be treated as MNAR and have 0 imputation for that respective group. 
+#Row with a higher number of missing values than a determined threshold (60%-70%), in a specific phenotype, will be treated as MNAR and be imputed with MinProb left censored imputation. 
+#Remaining rows will be treated as MAR and be imputed with KNN. 
+
+
+
+
+
+group_labels_batch1 <- metadata_filt_batch1$Group[metadata_filt_batch1$Group == "HCC" | metadata_filt_batch1$Group == "Cirrhosis"]
+group_labels_batch2 <- metadata_filt_batch2$Group[metadata_filt_batch2$Group == "HCC" | metadata_filt_batch2$Group == "Cirrhosis"]
+group_labels_batch3 <- metadata_filt_batch3$Group[metadata_filt_batch3$Group == "HCC" | metadata_filt_batch3$Group == "Cirrhosis"]
+
+
+  
+ #Custom function to impute data 
+impute_custom_MNAR_MAR <- function(data, group_labels, group1, group2, threshold, q, k) {
+#threshold: % of samples; q:  scalar of impute.MinProb function, k: k-value for knn imputation 
+  
+  #subset data by group/phenotype
+  group_data_1 <- data[, group_labels == group1]
+  group_data_2 <- data[, group_labels == group2]
+  
+  # Count NA values per row for each group
+  na_count_1 <- apply(group_data_1, 1, function(x) sum(is.na(x)))
+  na_count_2 <- apply(group_data_2, 1, function(x) sum(is.na(x)))
+  
+  #determine threshold of samples for high NA values
+  na_threshold_1 <- ceiling(threshold * ncol(group_data_1))
+  na_threshold_2 <- ceiling(threshold * ncol(group_data_2))
+  
+  #identify rows with higher number of NA values than the threshold
+  high_na_rows_1 <- na_count_1 >= na_threshold_1
+  high_na_rows_2 <- na_count_2 >= na_threshold_2
+  high_na_rows <- high_na_rows_1 | high_na_rows_2
+  
+  print("Number of rows to be imputed MinProb:")
+  print(table(high_na_rows))
+  
+  #identify rows with all or single NA values for each group
+  all_na_or_single_1 <- na_count_1 == ncol(group_data_1) | na_count_1 == (ncol(group_data_1) - 1)
+  all_na_or_single_2 <- na_count_2 == ncol(group_data_2) | na_count_2 == (ncol(group_data_2) - 1)
+  
+  #subset data for rows with all or single NA values and impute with 0 (kept separately to not interfere with the other imputations)
+  group1_all_na_or_single <- data[all_na_or_single_1, group_labels == group1]
+  group2_all_na_or_single <- data[all_na_or_single_2, group_labels == group2]
+  group1_all_na_or_single[is.na(group1_all_na_or_single)] <- 0
+  group2_all_na_or_single[is.na(group2_all_na_or_single)] <- 0
+  group1_all_na_or_single<-as.matrix(group1_all_na_or_single)
+  group2_all_na_or_single<- as.matrix(group2_all_na_or_single)
+  
+  print("Number of proteins for 0 imputation on group1:")
+  print(dim(group1_all_na_or_single)[1])
+  print("Number of proteins for 0 imputation on group2:")
+  print(dim(group2_all_na_or_single)[1])
+  
+  
+  #impute high NA rows with MinProb
+  data[high_na_rows, ] <- impute.MinProb(data[high_na_rows, ], q = q)
+  
+  #impute all remaining rows with KNN
+  data_KNN <- impute.wrapper.KNN(as.matrix(data), k)
+
+  #overwrite the group subset rows with 1 missing value or less with the 0 imputation
+ if (length(rownames(group1_all_na_or_single)) > 0) {
+    data_KNN[rownames(group1_all_na_or_single), group_labels == group1] <- as.matrix(group1_all_na_or_single)
+  }
+  if (length(rownames(group2_all_na_or_single)) > 0) {
+    data_KNN[rownames(group2_all_na_or_single), group_labels == group2] <- as.matrix(group2_all_na_or_single)
+  }
+
+  data_imputed <- as.data.frame(data_KNN)
+  return(data_imputed)
+}
+
+
+```
+<br/>
+Evaluating which k to use in KNN imputation:   
+k-values tested: 5, 10, 15.  
+```{r KNN }
+library(imputeLCMD)
+
+
+
+test_knn_imputation_stability <- function(data, k_values) {
+  results <- data.frame(k = integer(), mean_variance = numeric())
+  set.seed(123)  
+  for (k in k_values) {
+    imputed_data <- impute.wrapper.KNN(data, k)
+    
+    # Calculate the variance of the imputed data
+    variances <- apply(imputed_data, 2, var, na.rm = TRUE)
+    mean_variance <- mean(variances, na.rm = TRUE)
+    
+    results <- rbind(results, data.frame(k = k, mean_variance = mean_variance))
+  }
+  
+  return(results)
+}
+
+
+
+
+
+# k values to test
+k_values <- c(5, 10, 15)
+
+# Batch 1
+knn_results_stability_batch1 <- test_knn_imputation_stability(as.matrix(vsn_batch1), k_values)
+print(knn_results_stability_batch1)
+
+# Batch 2
+knn_results_stability_batch2 <- test_knn_imputation_stability(as.matrix(vsn_batch2), k_values)
+print(knn_results_stability_batch2)
+
+# Batch 3
+knn_results_stability_batch3 <- test_knn_imputation_stability(as.matrix(vsn_batch3), k_values)
+print(knn_results_stability_batch3)
+```
+<br/>  
+Batch 1: Higher k than 5 does not have a high decrease in variance.  
+Batch 2: Higher k than 5 does not have a high decrease in variance.  
+Batch 3: k=10 has a small decrease in variance compared to k=5.  
+<br/>  
+
+#### Perform imputation:
+<br/> 
+```{r imputation}
+set.seed(1233)
+Batch1_imputed<-impute_custom_MNAR_MAR(Batch1_vsn, group_labels_batch1, "HCC", "Cirrhosis", 0.75, q=0.01, k=5)
+Batch2_imputed<-impute_custom_MNAR_MAR(Batch2_vsn, group_labels_batch2, "HCC", "Cirrhosis", 0.75, q=0.01, k=5)
+Batch3_imputed<-impute_custom_MNAR_MAR(Batch3_vsn, group_labels_batch3, "HCC", "Cirrhosis", 0.75, q=0.01, k=10)
+```
+<br/>  
+
+#### Evaluating imputation with heatmap:
+<br/>  
+```{r heatmap_clust, out.width='50%', fig.keep='all' ,fig.show='hold', fig.cap='Figure 11. Clustering heatmap after imputation'}
+
+easy_pheatmap(matrix = as.matrix(Batch1_imputed), Samples= metadata_filt_batch1$Sample_ID, 
+                  variable1 = metadata_filt_batch1$Group,
+                  variable2 = metadata_filt_batch1$Etiology2,
+                  variable3 = metadata_filt_batch1$Year.of.blood.collection,
+                  variable4 = metadata_filt_batch1$Rounded.volume,
+                  color_variable1 = c("orange", "cyan"),
+                  color_variable2 = c(brewer.pal(length(unique(metadata_filt_batch1$Etiology2)), "BrBG")),
+                  color_variable3 = c(brewer.pal(length(unique(metadata_filt_batch1$Year.of.blood.collection)), "Set2")),
+                  color_variable4 = c(brewer.pal(length(unique(metadata_filt_batch1$Rounded.volume)), "Set1")),
+                  show_rownames= FALSE, main= "Heatmap Batch1")
+
+easy_pheatmap(matrix = as.matrix(Batch2_imputed), Samples= metadata_filt_batch2$Sample_ID, 
+                  variable1 = metadata_filt_batch2$Group,
+                  variable2 = metadata_filt_batch2$Etiology2,
+                  variable3 = metadata_filt_batch2$Year.of.blood.collection,
+                  variable4 = metadata_filt_batch2$Rounded.volume,
+                  color_variable1 = c("orange", "cyan"),
+                  color_variable2 = c(brewer.pal(length(unique(metadata_filt_batch2$Etiology2)), "BrBG")),
+                  color_variable3 = c(brewer.pal(length(unique(metadata_filt_batch2$Year.of.blood.collection)), "Set2")),
+                  color_variable4 = c(brewer.pal(length(unique(metadata_filt_batch2$Rounded.volume)), "Set1")),
+                  show_rownames= FALSE, main= "Heatmap Batch2")
+
+easy_pheatmap(matrix = as.matrix(Batch3_imputed), Samples= metadata_filt_batch3$Sample_ID, 
+                  variable1 = metadata_filt_batch3$Group,
+                  variable2 = metadata_filt_batch3$Etiology2,
+                  variable3 = metadata_filt_batch3$Year.of.blood.collection,
+                  variable4 = metadata_filt_batch3$Rounded.volume,
+                  color_variable1 = c("orange", "cyan"),
+                  color_variable2 = c(brewer.pal(length(unique(metadata_filt_batch3$Etiology2)), "BrBG")),
+                  color_variable3 = c(brewer.pal(length(unique(metadata_filt_batch3$Year.of.blood.collection)), "Set2")),
+                  color_variable4 = c(brewer.pal(length(unique(metadata_filt_batch3$Rounded.volume)), "Set1")),
+                  show_rownames= FALSE, main= "Heatmap Batch3")
+```
+<br/>  
+
+#### Evaluate imputation with PCA:
+<br/>  
+```{r imputedPCA, out.width='50%', fig.keep='all', fig.show='hold', fig.cap='Figure 12 PCAs after imputation'}
+
+
+PCA_imputed_Batch1<-prcomp(t(Batch1_imputed), scale. = TRUE)
+PCA_imputed_Batch2<-prcomp(t(Batch2_imputed), scale. = TRUE)
+PCA_imputed_Batch3<-prcomp(t(Batch3_imputed), scale. = TRUE)
+
+
+autoplot(PCA_imputed_Batch1, data=metadata_filt_batch1, colour='Group', main='Batch1 PCA_imputed colored by phenotype') + 
+  geom_text(aes(label = metadata_filt_batch1$Sample_ID), vjust = 1, hjust = 1)
+
+
+autoplot(PCA_imputed_Batch2, data=metadata_filt_batch2, colour='Group', main='Batch2 PCA_imputed colored by phenotype') + 
+  geom_text(aes(label = metadata_filt_batch2$Sample_ID), vjust = 1, hjust = 1)
+
+
+autoplot(PCA_imputed_Batch3, data=metadata_filt_batch3, colour='Group', main='Batch3 PCA_imputed colored by phenotype') + 
+  geom_text(aes(label = metadata_filt_batch3$Sample_ID), vjust = 1, hjust = 1)
+
+```
+<br/>  
+On the heatmaps with euclidean distance the clustering by phenotype improved 
+considerably in Batch 1 and Batch 3 samples. On PCA this separation is more evident
+for Batch 3 samples. 
+<br/> 
+
+#### Log2 Intensity distribution after imputation:
+<br/>  
+```{r intensity_dist_imp, out.width='50%', fig.keep='all', fig.show='hold', fig.cap='Figure 13. Intensity distribution after imputation'}
+
+matboxplot(as.matrix(Batch1_imputed), groupFactor = as.factor(metadata_filt_batch1$Group), xlab = " ", ylab = "density",
+           main = "Batch1 density Log2 Intensity values \nper phenotype/group", brewer.n = 8, brewer.name = "Set1")
+
+
+
+matboxplot(as.matrix(Batch2_imputed), groupFactor = as.factor(metadata_filt_batch2$Group), xlab = " ", ylab = "density",
+           main = "Batch2 density Log2 Intensity values \nper phenotype/group", brewer.n = 8, brewer.name = "Set1")
+
+
+
+matboxplot(as.matrix(Batch3_imputed), groupFactor = as.factor(metadata_filt_batch3$Group), xlab = " ", ylab = "density",
+           main = "Batch3 density Log2 Intensity values \nper phenotype/group", brewer.n = 8, brewer.name = "Set1")
+
+# Adding a legend
+legend("topright",                           
+legend = levels(as.factor(metadata_filt_batch1$Group)),  
+col = brewer.pal(8, "Set1"),          
+lty = 1,                              
+lwd = 2,                              
+title = "Batch")
+
+
+```
+<br/>  
+Normalization and imputation made the intensity distributions more consistent
+across samples. 
+<br/>
+
+## 4- Differential abundance per batch
+<br/>  
+Limma will be used for differential expression in each batch.
+<br/> 
+**Batch1**  
+<br/>  
+```{r DE batch1}
+
+#create the design matrix
+Group_batch1 <- factor(metadata_filt_batch1$Group)
+design_batch1 <- model.matrix(~ 0 + Group_batch1)
+colnames(design_batch1) <- make.names(gsub("Group_batch1", "", colnames(design_batch1)))
+
+# Fit the linear model
+fit_batch1 <- lmFit(Batch1_imputed, design_batch1)
+
+#contrasts to compare HCC vs Cirrhosis
+contrast.matrix_batch1 <- makeContrasts(HCCvsCirrhosis = HCC - Cirrhosis, levels=design_batch1)
+
+# fit contrasts
+fit2_batch1 <- contrasts.fit(fit_batch1, contrast.matrix_batch1)
+
+#apply empirical Bayes moderation
+fit2_batch1 <- eBayes(fit2_batch1)
+
+#results
+result_imputed_batch1 <- topTable(fit2_batch1, adjust="fdr", number=Inf)
+sign_result_imputed_batch1<- result_imputed_batch1[result_imputed_batch1$P.Value<0.2,]
+dim(sign_result_imputed_batch1)
+```
+<br/>
+**Batch2**  
+<br/>  
+
+```{r DE batch2}
+
+#create the design matrix
+Group_batch2 <- factor(metadata_filt_batch2$Group)
+design_batch2 <- model.matrix(~ 0 + Group_batch2)
+colnames(design_batch2) <- make.names(gsub("Group_batch2", "", colnames(design_batch2)))
+
+#fit the linear model
+fit_batch2 <- lmFit(Batch2_imputed, design_batch2)
+
+#contrasts to compare HCC vs Cirrhosis
+contrast.matrix_batch2 <- makeContrasts(HCCvsCirrhosis = HCC - Cirrhosis, levels=design_batch2)
+
+#fit contrasts
+fit2_batch2 <- contrasts.fit(fit_batch2, contrast.matrix_batch2)
+
+#apply empirical Bayes moderation
+fit2_batch2 <- eBayes(fit2_batch2)
+
+# results
+result_imputed_batch2 <- topTable(fit2_batch2, adjust="fdr", number=Inf)
+
+sign_result_imputed_batch2<- result_imputed_batch2[result_imputed_batch2$P.Value<0.2,]
+dim(sign_result_imputed_batch2)
+```
+<br/>
+**Batch3**  
+<br/>  
+
+```{r DE batch3}
+
+#create the design matrix
+Group_batch3 <- factor(metadata_filt_batch3$Group)
+design_batch3 <- model.matrix(~ 0 + Group_batch3)
+colnames(design_batch3) <- make.names(gsub("Group_batch3", "", colnames(design_batch3)))
+
+#fit the linear model
+fit_batch3 <- lmFit(Batch3_imputed, design_batch3)
+
+#contrasts to compare HCC vs Cirrhosis
+contrast.matrix_batch3 <- makeContrasts(HCCvsCirrhosis = HCC - Cirrhosis, levels=design_batch3)
+
+#fit contrasts
+fit2_batch3 <- contrasts.fit(fit_batch3, contrast.matrix_batch3)
+
+#apply empirical Bayes moderation
+fit2_batch3 <- eBayes(fit2_batch3)
+
+#results
+result_imputed_batch3 <- topTable(fit2_batch3, adjust="fdr", number=Inf)
+sign_result_imputed_batch3<- result_imputed_batch3[result_imputed_batch2$P.Value<0.2,]
+dim(sign_result_imputed_batch3)
+```
+<br/>  
+**Positive LOG2FC in the 3 batches**  
+```{r positive_FC}
+
+
+positive_logFC_batch1<-result_imputed_batch1[result_imputed_batch1$logFC>0,]
+positive_logFC_batch2<-result_imputed_batch2[result_imputed_batch2$logFC>0,]
+positive_logFC_batch3<-result_imputed_batch3[result_imputed_batch3$logFC>0,]
+
+intersection_pos_logFC_1<-intersect(rownames(positive_logFC_batch1), rownames(positive_logFC_batch2))
+intersection_pos_logFC_2<-intersect(rownames(positive_logFC_batch3), intersection_pos_logFC_1)
+
+
+
+
+sign_positive_logFC_batch1<- sign_result_imputed_batch1[sign_result_imputed_batch1$logFC>0,]
+sign_positive_logFC_batch2<- sign_result_imputed_batch2[sign_result_imputed_batch2$logFC>0,]
+sign_positive_logFC_batch3<- sign_result_imputed_batch3[sign_result_imputed_batch3$logFC>0,]
+
+sign_intersection_pos_logFC_1<-intersect(rownames(sign_positive_logFC_batch1), rownames(sign_positive_logFC_batch2))
+sign_intersection_pos_logFC_2<-intersect(rownames(sign_positive_logFC_batch3), sign_intersection_pos_logFC_1)
+
+
+
+print("Intersection for proteins with positive log2FC in the 3 batches:")
+length(intersection_pos_logFC_2)
+print("Intersection for proteins with positive log2FC and p-value <0.2 in the 3 batches:")
+length(sign_intersection_pos_logFC_2)
+
+
+```
+<br/>  
+**Negative LOG2FC in the 3 batches**  
+```{r negative_FC}
+
+
+negative_logFC_batch1<-result_imputed_batch1[result_imputed_batch1$logFC<0,]
+negative_logFC_batch2<-result_imputed_batch2[result_imputed_batch2$logFC<0,]
+negative_logFC_batch3<-result_imputed_batch3[result_imputed_batch3$logFC<0,]
+
+intersection_neg_logFC_1<-intersect(rownames(negative_logFC_batch1), rownames(negative_logFC_batch2))
+intersection_neg_logFC_2<-intersect(rownames(negative_logFC_batch3), intersection_neg_logFC_1)
+
+
+
+sign_negative_logFC_batch1<- sign_result_imputed_batch1[sign_result_imputed_batch1$logFC<0,]
+sign_negative_logFC_batch2<- sign_result_imputed_batch2[sign_result_imputed_batch2$logFC<0,]
+sign_negative_logFC_batch3<- sign_result_imputed_batch3[sign_result_imputed_batch3$logFC<0,]
+
+sign_intersection_neg_logFC_1<-intersect(rownames(sign_negative_logFC_batch1), rownames(sign_negative_logFC_batch2))
+sign_intersection_neg_logFC_2<-intersect(rownames(sign_negative_logFC_batch3), sign_intersection_neg_logFC_1)
+
+print("Intersection for proteins with negative log2FC in the 3 batches:")
+length(intersection_neg_logFC_2)
+print("Intersection for proteins with negative log2FC and p-value <0.2 in the 3 batches:")
+length(sign_intersection_neg_logFC_2)
+
+```
+<br/>  
+Considering the lack of agreement between batches, it was decided to merge the batches 
+for common rows/protein groups and correct for the batch effect previously observed.
+<br/>  
+
+## 5- Batch correction
+
+```{r mergedataset}
+
+
+Batch1_imputed <- as.data.frame(Batch1_imputed)
+Batch2_imputed <- as.data.frame(Batch2_imputed)
+Batch3_imputed <- as.data.frame(Batch3_imputed)
+
+#find intersecting row names
+common_rownames <- Reduce(intersect, list(rownames(Batch1_imputed), rownames(Batch2_imputed), rownames(Batch3_imputed)))
+
+#subset the datasets to include only common row names
+Batch1_common <- Batch1_imputed[common_rownames, ]
+Batch2_common <- Batch2_imputed[common_rownames, ]
+Batch3_common <- Batch3_imputed[common_rownames, ]
+
+rownames(Batch1_common) <- common_rownames
+rownames(Batch2_common) <- common_rownames
+rownames(Batch3_common) <- common_rownames
+
+#merge the datasets by row names (common row names)
+merged_data <- cbind(Batch1_common, Batch2_common, Batch3_common)
+
+
+merged_data <- merged_data[, !colnames(merged_data) %in% "rownames"]
+
+
+metadata_merged<- metadata[ metadata$Sample_ID %in% colnames(merged_data),]
+
+```
+
+
+```{r heatmap merged, fig.cap='Figure 14 Cluster heatmap of merged dataset'}
+#evaluating batch effect with clustering heatmap
+easy_pheatmap(matrix = as.matrix(merged_data), Samples= metadata_merged$Sample_ID, 
+                  variable1 = metadata_merged$Group,
+                  variable2 = metadata_merged$Etiology2,
+                  variable3 = metadata_merged$Year.of.blood.collection,
+                  variable4 = metadata_merged$MS_batch,
+                  color_variable1 = c("orange", "cyan"),
+                  color_variable2 = c(brewer.pal(length(unique(metadata_merged$Etiology2)), "BrBG")),
+                  color_variable3 = c(brewer.pal(length(unique(metadata_merged$Year.of.blood.collection)), "Set2")),
+                  color_variable4 = c(brewer.pal(length(unique(metadata_merged$MS_batch)), "Set1")),
+                  show_rownames= FALSE, main= "Heatmap all Batches")
+
+```
+<br/>  
+
+Samples tend to cluster by batch. Batch effect will be corrected with HarmoziR Limma:  
+
+```{r batch correction}
+
+des <- data.frame(ID = colnames(merged_data), sample = metadata_merged$Sample_ID, 
+                  batch = metadata_merged$MS_batch)
+
+des$batch<-gsub("Batch","", des$batch)
+
+
+#HarmonizR with limma
+set.seed(56676)
+corrected_data_harm_limma<-harmonizR(merged_data, des, output_file = FALSE, cores = 1,
+                                     algorithm = "limma", plot = TRUE)
+
+
+#HarmonizR with combat
+corrected_data_harm_combat<-harmonizR(merged_data, des, output_file = FALSE, cores = 1,
+                                     algorithm = "combat", plot = TRUE)
+
+
+#stop registed cluster
+library(doParallel)
+registerDoSEQ()
+
+```
+
+
+```{r heatmap after batch correction, fig.keep='all', fig.show='hold', fig.cap='Figure 15 Cluster heatmap of merged dataset after batch correction'}
+
+easy_pheatmap(matrix = as.matrix(corrected_data_harm_limma), Samples= metadata_merged$Sample_ID, 
+                  variable1 = metadata_merged$Group,
+                  variable2 = metadata_merged$Etiology2,
+                  variable3 = metadata_merged$Year.of.blood.collection,
+                  variable4 = metadata_merged$MS_batch,
+                  color_variable1 = c("orange", "cyan"),
+                  color_variable2 = c(brewer.pal(length(unique(metadata_merged$Etiology2)), "BrBG")),
+                  color_variable3 = c(brewer.pal(length(unique(metadata_merged$Year.of.blood.collection)), "Set2")),
+                  color_variable4 = c(brewer.pal(length(unique(metadata_merged$MS_batch)), "Set1")),
+                  show_rownames= FALSE, main= "Heatmap limma")
+
+easy_pheatmap(matrix = as.matrix(corrected_data_harm_combat), Samples= metadata_merged$Sample_ID, 
+                  variable1 = metadata_merged$Group,
+                  variable2 = metadata_merged$Etiology2,
+                  variable3 = metadata_merged$Year.of.blood.collection,
+                  variable4 = metadata_merged$MS_batch,
+                  color_variable1 = c("orange", "cyan"),
+                  color_variable2 = c(brewer.pal(length(unique(metadata_merged$Etiology2)), "BrBG")),
+                  color_variable3 = c(brewer.pal(length(unique(metadata_merged$Year.of.blood.collection)), "Set2")),
+                  color_variable4 = c(brewer.pal(length(unique(metadata_merged$MS_batch)), "Set1")),
+                  show_rownames= FALSE, main= "Heatmap combat")
+
+
+
+```
+<br/>
+
+Batches do not cluster as much after correction. Indicating that batch correction was successful.
+harmonizR with Combat seems to have less sub-clusters of the same batch compared to limma and 
+was selected. 
+
+<br/>
+
+
+
+## 6- Differentially abundance for Batch 1 and Batch 2 after batch correction
+
+
+
+```{r limma}
+library(limma)
+corrected_data_harm_combat_batch1_batch2<-corrected_data_harm_combat[, metadata_merged$MS_batch %in% c("Batch1", "Batch2")]
+metadata_merged_batch1_batch2<-metadata_merged[metadata_merged$MS_batch %in% c("Batch1", "Batch2"),]
+
+
+#design matrix
+Group <- factor(metadata_merged_batch1_batch2$Group)
+
+design <- model.matrix(~ 0 + Group )
+colnames(design) <- gsub("Group", "", colnames(design))
+
+
+#fit the linear model
+fit <- lmFit(corrected_data_harm_combat_batch1_batch2, design)
+
+#contrasts to compare HCC vs Cirrhosis
+contrast.matrix <- makeContrasts(HCCvsCirrhosis = HCC - Cirrhosis, levels=design)
+
+#fit contrasts
+fit2 <- contrasts.fit(fit, contrast.matrix)
+
+#apply empirical Bayes moderation
+fit2 <- eBayes(fit2)
+
+#top differentially expressed PGs
+result_batch_corrected_vsn<-topTable(fit2, adjust="fdr", number=Inf)
+
+vsn_knn_correction_DE<-result_batch_corrected_vsn
+vsn_knn_correction_DE_sign<-result_batch_corrected_vsn[result_batch_corrected_vsn$P.Value<0.05,]
+```       
+
+
+
+```{r anonimise_proteins}
+#anonimizing features
+
+protein_name_map<-read.csv("protein_names.csv")
+
+
+vsn_knn_correction_DE_anonimised <- vsn_knn_correction_DE
+name_mapping <- setNames(protein_name_map$Name, protein_name_map$Real_name)
+for (real_name in rownames(vsn_knn_correction_DE_anonimised)) {
+  if (real_name %in% names(name_mapping)) {
+    rownames(vsn_knn_correction_DE_anonimised)[rownames(vsn_knn_correction_DE_anonimised) == real_name] <- name_mapping[real_name]
+  }
+}
+
+```
+<br/>
+<br/>
+<br/>
+
+
+
+```{r volcanoplot,echo=FALSE, fig.keep='all', fig.show='hold', fig.cap='Figure 16. Volcano plot DESeq differntially abundance test.'}
+
+showGenes <- 24 #genes to be displayed with names
+colorS <- c("blue", "grey", "red")
+
+dataV <- vsn_knn_correction_DE_anonimised
+dataV <- dataV %>% mutate(gene = rownames(dataV), logp_val = -(log10(dataV$P.Value)),
+                          FC = ifelse(dataV$P.Value>0, 2^dataV$logFC, -(2^abs(dataV$logFC)))) %>%
+  mutate(sig = ifelse(dataV$P.Value<0.05 & dataV$logFC >= 0.4, "UP", ifelse(dataV$P.Value<0.05 & dataV$logFC <= (-0.4), "DN","n.s"))) 
+
+#select top genes to label
+top_genes <- dataV %>%
+  arrange(P.Value) %>%
+  head(showGenes) %>%
+  pull(gene)
+
+library(ggrepel)
+
+# volcano plot
+pv <- ggplot(data = dataV, aes(x = logFC, y = logp_val)) +
+  geom_point(alpha = 1, size = 5, aes(col = sig)) + 
+  scale_color_manual(values = colorS) +
+  xlab(expression("log"[2]*" FC")) + 
+  ylab(expression("-log"[10]*"(P.Value)")) + 
+  labs(col = " ") + 
+  geom_hline(yintercept = -log10(0.05), linetype = "dotted") +  
+  geom_vline(xintercept = c(-0.4, 0.4), linetype = "dotted") +
+  theme_bw() + 
+  geom_text_repel(data = subset(dataV, gene %in% top_genes),
+                  aes(label = gene),
+                  size = 10,
+                  box.padding = unit(0.5, "lines"),
+                  point.padding = unit(0.5, "lines")) +
+  ggtitle("Volcano Plot of limma results pipeline 3 \n(p-value < 0.05%, log2FC > |0.4|)") + 
+  theme(axis.title = element_text(size = 28),
+        axis.text = element_text(size = 28), 
+        plot.title = element_text(size = 30),
+        legend.title = element_blank(), 
+        legend.text = element_text(size = 24))
+
+
+pv
+
+
+```
+
+
+
+
+
+
+
+
+

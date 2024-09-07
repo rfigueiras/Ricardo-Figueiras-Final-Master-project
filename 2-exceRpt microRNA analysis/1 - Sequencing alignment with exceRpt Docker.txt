@@ -1,0 +1,58 @@
+
+# This scrip follows the steps described in https://github.gersteinlab.org/exceRpt/
+# Sequencing adaptors were previously trimmed using BBDuck. Adaptor trimming was confirmed with fastQC.
+# These steps were performed in using AWS EC2 instance: 
+# ssh -i UB_run.pem ubuntu@<REMOTE_IP>
+
+#!/bin/bash
+# This script aligns multiple miRNA sequencing samples in parallel using exceRpt Docker
+
+# Step 1: Pull the exceRpt Docker image
+docker pull rkitchen/excerpt
+
+# Step 2: Download the human genome database (hg38) for exceRpt
+mkdir ~/DirectoryContainingMyexceRptDatabase
+cd ~/DirectoryContainingMyexceRptDatabase
+wget http://org.gersteinlab.excerpt.s3-website-us-east-1.amazonaws.com/exceRptDB_v4_hg38_lowmem.tgz
+tar -xvf exceRptDB_v4_hg38_lowmem.tgz 
+
+# Step 3: Create a directory for storing logs
+mkdir -p ~/logs
+
+
+# Step 4: Define sample files and loop through the array to process samples in parallel
+declare -a samples=("MR_1_S40_L001_R1_001.fastq.gz_adaptorrm.fastq.gz" 
+                    "MR_118_S41_L001_R1_001.fastq.gz_adaptorrm.fastq.gz" 
+                    "MR_119_S42_L001_R1_001.fastq.gz_adaptorrm.fastq.gz" 
+                    "MR_120_S43_L001_R1_001.fastq.gz_adaptorrm.fastq.gz" 
+                    "MR_121_S44_L001_R1_001.fastq.gz_adaptorrm.fastq.gz"
+                    "MR_122_S45_L001_R1_001.fastq.gz_adaptorrm.fastq.gz")
+
+for sample in "${samples[@]}"
+do
+   echo "Starting processing for $sample..."
+   docker run -d \
+              -v ~/C1B2/data:/exceRptInput \ # directory containing the input FASTQ files
+              -v ~/DirectoryInWhichToPutMyResults/${sample}_results:/exceRptOutput \  # directory for output results
+              -v ~/DirectoryContainingMyexceRptDatabase/hg38:/exceRpt_DB/hg38 \ # human genome database (hg38) directory
+              -t rkitchen/excerpt \ # exceRpt Docker image
+              INPUT_FILE_PATH=/exceRptInput/$sample \
+              N_THREADS=8 > ~/logs/${sample}_docker.log 2>&1 &   # 8 cores, log output
+
+   if [ $? -eq 0 ]; then
+       echo "Container for $sample started successfully."
+   else
+       echo "Failed to start container for $sample."
+   fi
+done
+
+
+
+# Step 5: Copy results to local server
+# Replace <REMOTE_IP> with your actual EC2 instance IP
+scp -i ~/Desktop/UB_run.pem -r ubuntu@<REMOTE_IP>:/home/ubuntu/DirectoryInWhichToPutMyResults/ ~/Desktop/
+
+# Step 6: Merge results
+# Use mergePipelineRuns.R script interactively in R after downloading the results.
+
+

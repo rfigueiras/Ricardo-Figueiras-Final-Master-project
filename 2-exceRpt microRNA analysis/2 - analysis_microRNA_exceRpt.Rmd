@@ -1,0 +1,838 @@
+---
+title: "Supplementary material 8 - ExceRpt pipeline microRNA pre-processing and DE"
+author: "Ricardo Figueiras"
+output:
+  word_document: default
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
+options(repos = "https://cran.rstudio.com/")
+
+
+```
+
+```{r lib, eval=TRUE, echo=FALSE, include=FALSE}
+
+library(tidyverse)
+library(ggrepel)
+library(ggfortify) #for PCA
+library(pheatmap)
+library(DT)
+library(reshape2)
+library(dplyr)
+library(naniar)
+library(lubridate)
+# DEA
+library(limma)
+library(edgeR)
+library(DESeq2)
+library(sva)
+
+#install.packages("Seurat")
+#install.packages("devtools")
+#devtools::install_github("ChristophH/sctransform")
+# install glmGamPoi
+#if (!requireNamespace("BiocManager", quietly = TRUE)) install.packages("BiocManager")
+#BiocManager::install("glmGamPoi")
+# install sctransform from Github
+#install.packages("sctransform")
+
+library("sctransform")
+
+
+library(patchwork)
+library(dplyr)
+library(ggplot2)
+
+#install.packages("BiocManager")
+#BiocManager::install("zinbwave")
+library(zinbwave)
+library(Seurat)
+
+
+```
+
+
+
+
+<br/>
+
+## 1- Exploratory analysis
+
+<br/>
+```{r loading data, eval=TRUE, echo=FALSE}
+# Data loading
+Batch_comb<-read.csv("microRNA_counts.csv", check.names = FALSE)
+metadata<- read.csv("metadata_all.csv")
+
+rownames(Batch_comb)<- Batch_comb[,2]
+Batch_comb<- Batch_comb [,-c(1,2)]
+
+
+new_colnames <- gsub("MR_([0-9]+)?", "\\1", colnames(Batch_comb))
+new_colnames <- gsub("MR", "", new_colnames)
+colnames(Batch_comb)<-new_colnames
+
+
+library(dplyr)
+# Custom sorting function for "9A" and "9B"
+custom_sort <- function(x) {
+  special <- c("9A", "9B")
+  if (x %in% special) {
+    return(as.numeric(sub("A", ".1", sub("B", ".2", x))))
+  }
+  as.numeric(x)
+}
+
+ordered_indices <- order(sapply(colnames(Batch_comb), custom_sort))
+
+Batch_comb <- Batch_comb[, ordered_indices]
+```
+
+```{r filter healthy}
+
+metadata_f<-metadata[metadata$Group %in% c("HCC", "Cirrhosis"), ]
+Batch_comb_f<-Batch_comb[,colnames(Batch_comb) %in% metadata_f$Sample]
+Batch_comb_f<-Batch_comb_f[rowSums(Batch_comb_f)>0,]
+
+print("Samples per group:")
+table(metadata_f$Group)
+
+print("Total of microRNAs identified:")
+dim(Batch_comb_f)[1]
+
+```
+Total of 285 microRNAs were identified in 60 Cirrhosis samples and 59 HCC samples.
+
+
+
+```{r library size table, eval=TRUE, echo=FALSE}
+sampleT2 <- apply(Batch_comb_f, 2, sum)/10^3
+cat("Library size for aligned microRNA per samples ranges from", range(sampleT2)[1], "thousand reads to", range(sampleT2)[2], "thousand reads.\n")
+```
+
+### 1.1. Checking for missingness of values across samples 
+
+<br/>
+```{r library size plots, eval=TRUE, echo=FALSE}
+
+Batch_miss<-Batch_comb_f
+Batch_miss[Batch_miss==0]= NA
+p1<-vis_miss(Batch_miss, cluster = TRUE)
+```        
+
+```{r missing values, fig.show='hold',  fig.cap="Figure 1: Missingness for annotated microRNAs"}
+p1
+```
+<br/>
+85.5% of missing values before any filtering. 
+<br/> 
+
+
+## 2- Filtering steps
+
+<br/>
+
+### 2.1. QC regarding the library size of microRNAs reads:
+
+<br/>  
+
+```{r lib size table, eval=TRUE, echo=FALSE}
+
+
+
+sampleT2 <- apply(Batch_comb_f, 2, sum)/10^3
+sampleTDF<-data.frame(sample=names(sampleT2), total=sampleT2)
+
+p2<-ggplot(aes(x=sample, y=total, fill=sampleT2), data=sampleTDF) + geom_bar(stat="identity")+
+  ggtitle("Library size per sample")+
+  ylab("Thousands Reads")
+```
+<br/>  
+
+```{r library size, fig.show='hold', echo=FALSE,   fig.width= 11, fig.height=8, fig.cap="Figure 3: Library size per sample"}
+p2+ theme(axis.text.x = element_text(size = 7))
+```
+<br/>
+
+Aligned microRNAs reads seem to vary widely across samples, with some high outliers.
+
+
+<br/>  
+
+### 2.2. Remove microRNAs with low counts:
+
+<br/>
+Relax filtering for microRNAs with low counts: remove rows (microRNAs) that do not have at least 5 counts in at least 3 samples.
+
+<br/>
+
+```{r filter noise, eval=TRUE, echo=FALSE}
+
+# Filtering for each group samples that need to have at least 5 counts in each group
+keep_microRNAs_HCC <- rowSums(Batch_comb_f[,metadata_f$Group=="HCC"]>=5) >= 5
+keep_microRNAs_Cirrhosis <- rowSums(Batch_comb_f[,metadata_f$Group=="Cirrhosis"]>=5) >= 5
+
+
+keep_microRNAs<-keep_microRNAs_HCC|keep_microRNAs_Cirrhosis
+table(keep_microRNAs)
+
+countsF<-Batch_comb_f[keep_microRNAs, ]
+table(metadata_f$Group)
+dim(countsF)
+```
+<br/>  
+
+Only 56 microRNAs have at least 5 counts in at least 5 samples for at least one group. 
+
+<br/>  
+```{r miss, eval=TRUE, echo=FALSE}
+# missing values
+countsF_miss<-countsF
+countsF_miss[countsF_miss==0]= NA
+p2<-vis_miss(countsF_miss, cluster = TRUE)
+
+annotation<-data.frame(group=metadata_f$Group,
+                      day=metadata_f$Day.of.preparation,
+                      batch=metadata_f$RNAseq.batch)
+rownames(annotation)<-metadata_f$Sample
+```
+
+
+
+<br/>
+```{r heatmapdesign, eval=TRUE, echo=FALSE, fig.align='center'}
+
+
+annotation$group <- factor(annotation$group, levels = c("HCC", "Cirrhosis","QC"))
+
+annotation$day <- factor(annotation$day, levels = sort(unique(annotation$day)))
+
+annotation$batch<-factor(annotation$batch)
+
+countsF_map<-countsF
+countsF_map[countsF_map==0]<-0.5
+
+color_day<-c("darkorange3", "olivedrab", "magenta", "goldenrod1", "seashell3","black", "dodgerblue", "mediumpurple", "firebrick", "steelblue","gray", "chocolate4"
+,"turquoise","blue","darkorchid1", "darksalmon", "darkgreen")
+
+
+color_group<-c("coral1", "royalblue2", "palegreen3")
+
+color_batch<-c("indianred","deepskyblue")
+
+annotation_color<-list(group = setNames(color_group, levels(annotation$group)),
+                       day= setNames(color_day, levels(annotation$day)),
+                       batch= setNames(color_batch, levels(annotation$batch)))
+                       
+```
+<br/> 
+
+
+
+### 2.3. Missingness after filtering:
+
+<br/> 
+
+```{r missvaluesfilt, fig.show='hold', echo=FALSE,  fig.cap="Figure 4: Missing values after filtering"}
+
+p2
+```
+<br/> 
+
+Missing values are 46.4% on average after filtering.
+
+<br/> 
+
+### 2.4. Clustered heatmap raw reads after filtering:
+<br/> 
+```{r heatmapafterfilt, fig.show='hold',  fig.cap="Figure 5: Heatmap after filtering"}
+
+pheatmap(log2(countsF_map),
+         annotation = annotation,
+         annotation_color = annotation_color,
+         cluster_rows = TRUE,
+         cluster_cols = TRUE,
+         show_rownames = TRUE,
+         main="Raw data after filtering for low counts",
+         fontsize = 8)
+```
+<br/> 
+
+Some agregation visible for some days of RNA isolation (day 1, 2 and 3 have some samples in same subcluster). miRNA_17 seems to be particularly affected with lower reads for that cluster. (euclidean distance).  
+
+<br/>
+
+
+
+## 3- Normalization and PCA
+
+
+```{r TMM, eval=TRUE, include=FALSE, echo=FALSE}
+d<-DGEList (counts = countsF)
+Norm.Factor <- calcNormFactors(d, method = "TMM")
+countsTMM <- edgeR::cpm(Norm.Factor, log = T)
+
+x<-countsTMM
+```
+
+```{r TPM dist, eval=TRUE, fig.show='hold', fig.cap='Figure 6. TPM counts distribution'}
+
+TMM_dist<-as.data.frame(x[,1:40]) %>% gather() 
+                 
+p_TMM<-ggplot(TMM_dist, aes(x = value)) +
+geom_histogram(binwidth=0.25) +
+facet_wrap(~key)+
+labs(title = "Histogram of normalized TMM values")+ ylab("Frequency")+ ylim(0, 10)+xlim(10,20)
+
+p_TMM
+
+```
+<br/> 
+
+TMM normalization distribution does resemble a normal distribution in most of the samples and it tends to appear left skewed in some samples. The high level of missing values probably affects the normalization.
+
+
+<br/> 
+```{r TPM, eval=TRUE, echo=FALSE, include=FALSE}
+Batch_length <- 20
+
+
+RPK <- countsF/Batch_length * 10^3
+TPM_counts <- apply(RPK, 2, function(x) x / sum(x) * 10^6)
+head(colSums(TPM_counts))
+```
+
+<br/> 
+
+TPM and TMM normalization will be used to evaluate sample clustering by principal component analysis. 
+
+<br/> 
+```{r PCA scaled, eval=TRUE, echo=FALSE, out.width='50%', fig.keep='all', fig.show='hold', fig.cap='Figure 6. Different normalization strategies in PCA after  filtering, colored by phenotype'}
+
+
+
+
+metadata_f$RNAseq.batch<-factor(metadata_f$RNAseq.batch)
+metadata_f$Day.of.preparation<-factor(metadata_f$Day.of.preparation)
+
+
+
+pca.filt_TPM <- prcomp(t(TPM_counts), scale=T )
+summary_pca_TPM <- summary(pca.filt_TPM)
+
+
+autoplot(pca.filt_TPM, data=metadata_f, colour='Group', main='PCA TPM scaled phenotype') + 
+  geom_text(aes(label = metadata_f$Sample), vjust = 1, hjust = 1)
+
+pca.filt_TMM <- prcomp(t(x), scale=T )
+summary_pca_TMM <- summary(pca.filt_TMM)
+
+
+autoplot(pca.filt_TMM, data=metadata_f, colour='Group', main='PCA TMM scaled phenotype') + 
+  geom_text(aes(label = metadata_f$Sample), vjust = 1, hjust = 1)
+```
+
+```{r PCA scaled day of preparation, eval=TRUE, echo=FALSE, out.width='50%', fig.keep='all', fig.show='hold', fig.cap='Figure 7. Different normalization strategies in PCA for sequencing bacth1 after filtering, colored by day of RNA isolation'}
+
+
+metadata_f_batch1<-metadata_f[metadata_f$RNAseq.batch=="1",]
+
+
+pca.filt_TPM_batch1 <- prcomp(t(TPM_counts[,metadata_f$RNAseq.batch=="1"]), scale=T )
+summary_pca_TPM_batch1 <- summary(pca.filt_TPM_batch1)
+
+
+
+autoplot(pca.filt_TPM_batch1, data=metadata_f_batch1, colour='Day.of.preparation', main='PCA TPM  day of preparation Batch1') + 
+  geom_text(aes(label = metadata_f_batch1$Sample), vjust = 1, hjust = 1)
+
+
+
+autoplot(pca.filt_TPM_batch1, data=metadata_f_batch1, colour='Group', main='PCA TPM  Group Batch1') + 
+  geom_text(aes(label = metadata_f_batch1$Sample), vjust = 1, hjust = 1)
+
+```
+<br/> 
+
+There is not obvious separation of the two phenotype groups. There is no batch effect between the two sequencing batches although a nuanced aggregation for some samples of the first days of RNA isolation is observed. 
+
+br/> 
+
+
+```{r edgeR2, eval=TRUE, echo=FALSE}
+
+
+group <- factor(metadata_f$Group)
+y <- DGEList(counts=x, group=group)
+design <- model.matrix(~group)
+
+y <- estimateDisp(y, design=design)
+
+design <- model.matrix(~0 + group)
+fit <- glmQLFit(y, design)
+
+
+contrast <- makeContrasts(groupHCC-groupCirrhosis, levels=design)
+results <- glmQLFTest(fit, contrast=contrast)
+
+top_tags <- topTags(results, n=Inf)
+
+is.de <- decideTestsDGE(results, adjust.method="none",p.value=0.1)
+summary(is.de)
+```
+<br/> 
+
+Only 1 microRNA is DE for a p-value of 0.1%, however the TMM normalization does not seem suitable for this dataset probably because of the high rate of MVs.
+
+Zero inflation is going to be test to evaluate if normalization that handle zero inflation need to be used:
+
+<br/> 
+
+## 3.1 - Zero inflation test
+
+
+```{r zero inflation test}
+library(pscl)
+countsF <- round(countsF)
+
+
+
+#zero inflation test function using negative binomial distribution
+test_zero_inflation <- function(gene_counts) {
+  response <- as.integer(gene_counts > 0)
+  zip_model <- zeroinfl(response ~ 1 | 1, dist = "negbin")
+  coef_summary <- summary(zip_model)$coefficients
+  
+  p_count <- coef_summary$count["(Intercept)", "Pr(>|z|)"]
+  p_zero_inflation <- coef_summary$zero["(Intercept)", "Pr(>|z|)"]
+  return(c(p_count, p_zero_inflation))
+}
+
+#filtering rows without any missing value
+no_zero_rows <- apply(countsF, 1, function(row) all(row > 0))
+print("MicroRNAs with any missing-values:")
+sum(no_zero_rows)
+
+countsF_filtered <- countsF[!no_zero_rows, ]
+
+
+results <- apply(countsF_filtered, 1, test_zero_inflation)
+
+#Convert results into a matrix
+results_matrix <- matrix(unlist(results), ncol = 2, byrow = TRUE)
+colnames(results_matrix) <- c("p_count", "p_zero_inflation")
+
+
+results_matrix<-as.data.frame(results_matrix)
+
+results_matrix[results_matrix$p_zero_inflation<0.05]
+
+#filtering rows based on p_zero_inflation
+significant_zero_inflation <- results_matrix[results_matrix$p_zero_inflation < 0.05, ]
+
+
+print("MicroRNAs significant for zero-inflation:")
+dim(significant_zero_inflation)[1]
+
+
+```
+
+<br/> 
+
+Only 1 miRNA does not have MVs and no miRNA was significant for zero inflation.  
+DESeq2 and Seurat will be used for differential abundance analysis.  
+DESeq2 negative binomial distribution approach to handle variability might be more suitable than TMM for the presence of sparse MVs, while Seurat was designed specifically for sc-RNAseq which is known to have a high rate of MVs. 
+<br/> 
+
+
+## 4- Negative binomial distribution normalization and DESeq2 differential abundance
+
+<br/> 
+
+```{r DESEQ,echo=FALSE, out.width='50%', fig.keep='all', fig.show='hold', fig.cap='Figure 8. DESeq2 Dispersion plot'}
+
+#DESeq2 DE
+
+countsF <- round(countsF)
+# Create DESeqDataSet object 
+dds <- DESeqDataSetFromMatrix(countData = countsF,
+                              colData = metadata_f,
+                              design = ~ Group)
+
+
+#normalize and perform differential expression analysis with DESeq
+dds <- DESeq(dds)
+
+
+res <- results(dds, contrast = c("Group", "HCC", "Cirrhosis"))
+
+resOrdered <- res[order(res$padj), ]
+
+
+resOrdered <- resOrdered[!is.na(resOrdered$padj), ]
+
+
+top_res <- as.data.frame(resOrdered)
+
+top_res_sign_p_value<- top_res[top_res$pvalue < 0.05 & abs(top_res$log2FoldChange) > 0.5, ]
+top_res_sign_FDR<-top_res[top_res$padj < 0.1 & abs(top_res$log2FoldChange) > 0.5, ]
+
+print("Number of microRNA differentially expressed with DESeq2 for a p-value of 0.05 and LOG2FC>|0.5|")
+dim(top_res_sign_p_value)[1]
+print("Number of microRNA differentially expressed with DESeq2 for a adjusted p-value of 0.1 and LOG2FC>|0.5|")
+dim(top_res_sign_FDR)[1]
+```
+<br/> 
+
+
+
+```{r MAplot,echo=FALSE, out.width='50%', fig.keep='all', fig.show='hold', fig.cap='Figure 9. DESeq2 MA plot'}
+
+
+# dispersion
+dds_esf <- estimateSizeFactors(dds)
+dds_D <- estimateDispersions(dds_esf)
+
+plotDispEsts(dds_D)
+# MA plot
+plotMA(dds, main = "DESeq2 MA Plot", ylim = c(-2, 2))
+
+```
+<br/> 
+The dispersion looks typical for low counts, the number of counts are low for all microRNAs what can explain why there isn't a notable decrease in the dispersion along the graph usually observed in features with higher counts.
+
+```{r DESEQ2_DE,echo=FALSE, out.width='50%', fig.keep='all', fig.show='hold', fig.cap='Figure 10. Volcano plot DESeq differntially abundance test.'}
+colorS <- c("blue", "grey", "red")
+
+
+
+showGenes <- 11 #genes to be displayed with names
+colorS <- c("blue", "grey", "red")
+
+dataV <- top_res
+dataV <- dataV %>% mutate(gene = rownames(dataV), logp_val_adj = -(log10(dataV$padj)),
+                          FC = ifelse(dataV$padj>0, 2^dataV$log2FoldChange, -(2^abs(dataV$padj)))) %>%
+  mutate(sig = ifelse(dataV$padj<0.1 & dataV$log2FoldChange >= 0.5, "UP", ifelse(dataV$padj<0.1 & dataV$log2FoldChange < (-0.5), "DN","n.s"))) 
+
+#select top genes to label
+top_genes <- dataV %>%
+  arrange(pvalue) %>%
+  head(showGenes) %>%
+  pull(gene)
+
+library(ggrepel)
+
+pv <- ggplot(data=dataV, aes(x=log2FoldChange, y=logp_val_adj )) +
+  geom_point(alpha = 1, size= 1, aes(col = sig)) + 
+  scale_color_manual(values = colorS) +
+  xlab(expression("log"[2]*"FC")) + ylab(expression("-log"[10]*"(p_val_adj)")) + labs(col=" ") + 
+  geom_vline(xintercept = 0.5, linetype= "dotted") + geom_vline(xintercept = -0.5, linetype= "dotted") + 
+  geom_hline(yintercept = -log10(0.1), linetype= "dotted")  +  theme_bw() +
+  geom_text_repel(data = subset(dataV, gene %in% top_genes),
+                  aes(label = gene),
+                  size = 3,
+                  box.padding = unit(0.1, "lines"),
+                  point.padding = unit(0.1, "lines"))
+
+
+pv <- pv + ggtitle("Volcano Plot of DESeq results \n(FDR < 0.1%, log2FC > |0.5|) ") +
+  theme(axis.title = element_text(size = 18),
+        axis.text = element_text(size = 16), 
+        plot.title = element_text(size = 18),
+        legend.title = element_blank(), 
+        legend.text = element_text(size = 14))
+
+pv
+
+
+#ggsave("Volcano plot miRNAs DESeq.png", plot = pv, width = 10, height = 6, dpi=600)
+
+```
+
+<br/> 
+
+
+There are 11 microRNAs found significant with DESeq analysis for a adjusted p-value of 0.1%. The 11 markers are downregulated in HCC with cirrhosis patients compared to cirrhotic patients. 
+
+
+```{r heatmapDESEQ, fig.show='hold', echo=FALSE,   fig.width= 8, fig.height=8, fig.cap="Figure 11: Heatmap after filtering"}
+#heatmaps after Negative bionomial dist. normalization
+
+
+normalized_counts <- counts(dds, normalized=TRUE)
+normalized_counts[normalized_counts==0]<-0.5
+colnames(normalized_counts)<- metadata_f$Sample
+
+pheatmap(log2(normalized_counts),
+         annotation = annotation,
+         annotation_color = annotation_color,
+         cluster_rows = TRUE,
+         cluster_cols = TRUE,
+         show_rownames = TRUE,
+         main = "Heatmap negative binomical normalization",
+         fontsize_row = 8) 
+
+pheatmap(log2(normalized_counts[!rownames(normalized_counts) %in% "miRNA_17", ]),
+         annotation = annotation,
+         annotation_color = annotation_color,
+         cluster_rows = TRUE,
+         cluster_cols = TRUE,
+         show_rownames = TRUE,
+         main= "Heatmap negative binomical normalization \n (removing miRNA_17)",
+         fontsize_row = 8) 
+
+```
+
+
+## 5- SCTransform normalization and Seurat differential abundance
+<br/> 
+```{r rownames_seurat, eval=TRUE, echo=FALSE}
+
+new_rownames<-gsub("_","-",rownames(countsF))
+rownames(countsF)<-new_rownames
+
+colnames(countsF)<-rownames(metadata_f)
+
+seurat_obj<-CreateSeuratObject(counts=countsF)
+
+```
+<br/>   
+```{r variables_seurat, eval=TRUE, echo=FALSE}
+metadata_f$Day.of.preparation<-as.factor(metadata_f$Day.of.preparation)
+
+
+seurat_obj@meta.data$Day.of.preparation <- 
+  metadata_f$Day.of.preparation[match(rownames(seurat_obj@meta.data), 
+                                         rownames(metadata_f))]
+
+seurat_obj@meta.data$Group <- 
+  metadata_f$Group[match(rownames(seurat_obj@meta.data), 
+                                         rownames(metadata_f))]
+
+seurat_obj@meta.data$aetiology <- 
+  metadata_f$Cirrhosis.or.liver.disease.etiology[match(rownames(seurat_obj@meta.data),rownames(metadata_f))]
+
+
+seurat_obj@meta.data$batch <- 
+  metadata_f$RNAseq.batch[match(rownames(seurat_obj@meta.data), rownames(metadata_f))]
+
+seurat_obj@meta.data$Sample <- 
+  metadata_f$Sample[match(rownames(seurat_obj@meta.data), rownames(metadata_f))]
+```
+<br/>   
+
+### 5.1 PCA after SCTransform normalization
+<br/> 
+
+
+```{r regressing_seurat, eval=TRUE, echo=FALSE}
+seurat_obj <- SCTransform(seurat_obj, vst.flavor="v2")
+```
+```{r PCA_seurat, out.width='50%', eval=TRUE, echo=FALSE}
+seurat_obj <- RunPCA(seurat_obj)
+DimPlot(seurat_obj, reduction = "pca", group.by = "Group")
+DimPlot(seurat_obj, reduction = "pca", group.by = "Day.of.preparation")
+DimPlot(seurat_obj, reduction = "pca", group.by = "batch")
+```
+<br/>   
+
+### 5.2 UMAP after SCTransform normalization
+<br/> 
+
+```{r UMAP_Seurat, out.width='50%', eval=TRUE, echo=FALSE}
+# UMAP
+seurat_obj <- RunUMAP(seurat_obj, dims = 1:10)
+DimPlot(seurat_obj, reduction = "umap", group.by = "Group")
+
+DimPlot(seurat_obj, reduction = "umap", group.by = "Day.of.preparation")
+
+DimPlot(seurat_obj, reduction = "umap", group.by = "batch")
+```
+<br/>   
+
+### 5.3 Diferential abundance with Seurat
+<br/> 
+
+```{r DE_Seurat1, eval=TRUE, echo=FALSE}
+
+seurat_obj <- SetIdent(seurat_obj, value = "Group")
+hcc_vs_cirrhosis_markers <- FindMarkers(seurat_obj, ident.1 = "HCC", ident.2 = "Cirrhosis", min.pct = 0.25)
+seurat_markers_FDR<-hcc_vs_cirrhosis_markers[hcc_vs_cirrhosis_markers$p_val_adj<0.1,]
+seurat_markers_FDR<-seurat_markers_FDR[abs(seurat_markers_FDR$avg_log2FC)>0.5,]
+
+
+seurat_markers<-hcc_vs_cirrhosis_markers[hcc_vs_cirrhosis_markers$p_val<0.05,]
+seurat_markers<-seurat_markers[abs(seurat_markers$avg_log2FC)>0.5,]
+cat(dim(seurat_markers_FDR)[1], "microRNAs are DE for a FDR adjusted p-value of 0.1 and log2 Fold change > |0.5| and", dim(seurat_markers)[1], " microRNAs are DE for a p-value of 0.05 without correction for multiple testing nd log2 Fold change > |0.5|.\n")
+```
+
+<br/>   
+
+###  5.4 Evaluating regressing out day of preparation (day of RNA isolation)
+<br/> 
+
+
+```{r regressing_seuratbatch, eval=TRUE, echo=FALSE}
+
+seurat_obj_regressed <- SCTransform(seurat_obj, vars.to.regress = "Day.of.preparation", vst.flavor="v2")
+```
+
+<br/>   
+
+####  5.4.1 PCA after regressing out day of preparation
+<br/> 
+
+
+```{r PCA_seurat_batch, out.width='50%', eval=TRUE, echo=FALSE}
+seurat_obj_regressed <- RunPCA(seurat_obj_regressed)
+DimPlot(seurat_obj_regressed, reduction = "pca", group.by = "Group")
+DimPlot(seurat_obj_regressed, reduction = "pca", group.by = "Day.of.preparation")
+DimPlot(seurat_obj_regressed, reduction = "pca", group.by = "batch")
+```
+<br/>   
+
+####  5.4.2 UMAP after regressing out day of preparation
+<br/> 
+
+```{r UMAP_Seurat_batch, out.width='50%', eval=TRUE, echo=FALSE}
+# UMAP
+seurat_obj_regressed <- RunUMAP(seurat_obj_regressed, dims = 1:10)
+DimPlot(seurat_obj_regressed, reduction = "umap", group.by = "Group")
+
+DimPlot(seurat_obj_regressed, reduction = "umap", group.by = "Day.of.preparation")
+
+DimPlot(seurat_obj_regressed, reduction = "umap", group.by = "batch")
+```
+<br/> 
+
+####  5.4.3 Comparision by heatmap with hirearchical clustering
+<br/> 
+
+```{r heatmap_seurat, fig.show='hold', fig.keep='all', echo=FALSE,   fig.width= 8, fig.height=8, fig.cap="Figure 11: Heatmap after "}
+
+seurat_counts_norm<-as.data.frame(seurat_obj@assays$SCT@counts)
+seurat_counts_norm_regr<-as.data.frame(seurat_obj_regressed@assays$SCT@counts)
+
+heatmap_seurat_counts_norm<-seurat_counts_norm
+heatmap_seurat_counts_norm_regr<-seurat_counts_norm_regr
+
+heatmap_seurat_counts_norm[heatmap_seurat_counts_norm==0]<-0.5
+heatmap_seurat_counts_norm_regr[heatmap_seurat_counts_norm_regr==0]<-0.5
+
+colnames(heatmap_seurat_counts_norm)<- seurat_obj$Sample
+colnames(heatmap_seurat_counts_norm_regr)<- seurat_obj$Sample
+
+pheatmap(log2(heatmap_seurat_counts_norm),
+         annotation = annotation,
+         annotation_color = annotation_color,
+         cluster_rows = TRUE,
+         cluster_cols = TRUE,
+         show_rownames = TRUE,
+          main="Heatmap normalization with Seurat",
+         fontsize_row = 8) 
+
+
+pheatmap(log2(heatmap_seurat_counts_norm_regr),
+         annotation = annotation,
+         annotation_color = annotation_color,
+         cluster_rows = TRUE,
+         cluster_cols = TRUE,
+         show_rownames = TRUE,
+          main="Heatmap normalization with Seurat \n regressing RNA-isolation day",
+         fontsize_row = 8) 
+
+
+
+
+pheatmap(log2(heatmap_seurat_counts_norm[-13,]),
+         annotation = annotation,
+         annotation_color = annotation_color,
+         cluster_rows = TRUE,
+         cluster_cols = TRUE,
+         show_rownames = TRUE,
+         main="Heatmap normalization with Seurat \n (removing miRNA_17)",
+         fontsize_row = 8) 
+```
+
+
+
+<br/>   
+
+##  6. MicroRNAs differentially abundant for both DESeq2 and Seurat
+
+<br/> 
+
+
+```{r DESEQ_seurat, eval=TRUE, echo=FALSE}
+
+print("MicroRNA considered differntial abundant for Seurat (p-value<0.05 and log2 FoldChange>|0.5|) and DESeq2 (adjusted p-value < 0.1 and log2 FoldChange>|0.5|):")
+
+rownames(top_res_sign_FDR)<-gsub("_","-",rownames(top_res_sign_FDR))
+intersect(rownames(seurat_markers), rownames(top_res_sign_FDR))
+```
+
+
+
+```{r volcano,echo=FALSE, out.width='50%', fig.keep='all', fig.show='hold', fig.cap='Figure 10. Volcano plot Seurat differntially abundance test.'}
+colorS <- c("blue", "grey", "red")
+
+
+
+showGenes <- 8 #genes to be displayed with names
+colorS <- c("blue", "grey", "red")
+
+dataV2 <- hcc_vs_cirrhosis_markers
+dataV2 <- dataV2 %>% mutate(gene = rownames(dataV2), logp_val= -(log10(dataV2$p_val)),
+                          FC = ifelse(dataV2$p_val>0, 2^dataV2$avg_log2FC, -(2^abs(dataV2$p_val)))) %>%
+  mutate(sig = ifelse(dataV2$p_val<0.05 & dataV2$avg_log2FC >= 0.5, "UP", ifelse(dataV2$p_val<0.05 & dataV2$avg_log2FC < (-0.5), "DN","n.s"))) 
+
+#select top genes to label
+top_genes <- dataV2 %>%
+  arrange(p_val) %>%
+  head(showGenes) %>%
+  pull(gene)
+
+library(ggrepel)
+
+pv2 <- ggplot(data=dataV2, aes(x=avg_log2FC, y=logp_val)) +
+  geom_point(alpha = 1, size= 1, aes(col = sig)) + 
+  scale_color_manual(values = colorS) +
+  xlab(expression("log"[2]*"FC")) + ylab(expression("-log"[10]*"(p_val)")) + labs(col=" ") + 
+  geom_vline(xintercept = 0.5, linetype= "dotted") + geom_vline(xintercept = -0.5, linetype= "dotted") + 
+  geom_hline(yintercept = -log10(0.05), linetype= "dotted")  +  theme_bw() +
+  geom_text_repel(data = subset(dataV2, gene %in% top_genes),
+                  aes(label = gene),
+                  size = 3,
+                  box.padding = unit(0.1, "lines"),
+                  point.padding = unit(0.1, "lines"))
+
+
+pv2 <- pv2 + ggtitle("Volcano Plot of Seurat results \n(p-value < 0.05%, log2FC > |0.5|) ") +
+  theme(axis.title = element_text(size = 18),
+        axis.text = element_text(size = 16), 
+        plot.title = element_text(size = 18),
+        legend.title = element_blank(), 
+        legend.text = element_text(size = 14))
+
+pv2
+
+
+#ggsave("Volcano plot miRNAs Seurat.png", plot = pv2, width = 10, height = 6, dpi=600)
+
+```
+
+
+```{r DE_Seurat2, eval=TRUE, echo=FALSE}
+
+seurat_counts<- seurat_obj@assays$SCT@counts
+
+
+seurat_counts <- as.data.frame(as(seurat_counts, "matrix"))
+```
+
+
+
+
