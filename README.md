@@ -1,6 +1,6 @@
 # Ricardo-Figueiras-Final-Master-project  
 ## Master in Omics Data Analysis, Universitat de Vic (UVIC)  
-Some of the code used for the final master project: "Multi center Targeted Multiomic Profiling of Plasma Circulating Extracellular Vesicles for Hepatocellular Carcinoma Detection in Liver Cirrhosis" including:  
+Some of the code used for the final master project: "Multiomic Profiling of Circulating Hepatocyte-Derived Extracellular Vesicles for Hepatocellular Carcinoma Detection in Liver Cirrhosis"  
 
 ### 1- Proteomics analysis:  
 1- Proteomics_functional_analysis>R: includes analysis with “EVqualityMS” (https://github.com/ruma1974/EVqualityMS), KEGG pathway enrichment analysis, liver markers enrichment according to GTEX database and heatmaps with MIVEV2023 markers.  
